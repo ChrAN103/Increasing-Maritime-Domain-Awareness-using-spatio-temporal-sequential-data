@@ -111,6 +111,8 @@ class Dataloader:
 
         # Keep Class A only (better data quality for commercial routes)
         df = df[df["Type of mobile"] == "Class A"]
+        # Perhaps remove the entire coloumn hereafter? All not class A ships are removed
+        df = df.drop(columns=["Type of mobile"])
 
         df = df[df["MMSI"].str.len() == 9]
         df = df[df["MMSI"].str[:3].astype(int).between(200, 775)]
@@ -129,9 +131,9 @@ class Dataloader:
         df = df.groupby("MMSI").filter(track_filter)
         df = df.sort_values(['MMSI', 'Timestamp'])
     
-        # Change: segment route if time gap >= 30 minutes
+        # Change: segment route if time gap >= 7.5 minutes
         df['Segment'] = df.groupby('MMSI')['Timestamp'].transform(
-            lambda x: (x.diff().dt.total_seconds().fillna(0) >= 30 * 60).cumsum())
+            lambda x: (x.diff().dt.total_seconds().fillna(0) >= 15/2 * 60).cumsum())
     
         df = df.groupby(["MMSI", "Segment"]).filter(track_filter)
         df = df.reset_index(drop=True)
@@ -150,9 +152,45 @@ class Dataloader:
         valid_destinations = set(port_locodes["LOCODE"].str.upper().str.strip())
         df = df[df["Destination"].isin(valid_destinations)]
 
+        # To reduce size, we dont keep data for the same ship that are within 10 minutes of each other
+        # IMPORTANT: Downsample within each segment, not across segments
+        def downsample_group(g):
+            # 1. Sort by time (ensure chronological order)
+            g = g.sort_values("Timestamp")
+            # 2. Calculate time difference between consecutive points
+            time_diffs = g["Timestamp"].diff().dt.total_seconds().fillna(600)  # First point always kept
+            # diff() computes time between row[i] and row[i-1]
+            # fillna(600) sets first point's diff to 600 seconds (always kept)
+            # 3. Keep only points that are >= 30 seconds apart
+            mask = time_diffs >= 0.5*60 # 30 seconds in seconds
+            # 4. Return filtered DataFrame
+            return g[mask]
+
+        df = df.groupby(["MMSI", "Segment"], group_keys=False).apply(downsample_group).reset_index(drop=True)
+
+        df["Ship type"] = df["Ship type"].astype('category')  # ~10-20 unique ship types
+        df["Destination"] = df["Destination"].astype('category')  # Limited set of ports
+        df["MMSI"] = df["MMSI"].astype('category')  # Repeated vessel IDs
+
         table = pyarrow.Table.from_pandas(df, preserve_index=False)
         pyarrow.parquet.write_to_dataset(
             table,
             root_path=self.out_path,
             partition_cols=["MMSI", "Segment"]
         )
+    
+    # def load_data(self):
+    #     dataset = pyarrow.parquet.ParquetDataset(self.out_path)
+    #     table = dataset.read()
+    #     df = table.to_pandas()
+    #     return df
+    
+    # def train_test_split(self, df: pd.DataFrame, test_size: float = 0.2):
+    #     mmsis = df["MMSI"].unique()
+    #     n_test = int(len(mmsis) * test_size)
+    #     test_mmsis = set(mmsis[:n_test])
+    
+    #     train_df = df[~df["MMSI"].isin(test_mmsis)].reset_index(drop=True)
+    #     test_df = df[df["MMSI"].isin(test_mmsis)].reset_index(drop=True)
+    
+    #     return train_df, test_df
