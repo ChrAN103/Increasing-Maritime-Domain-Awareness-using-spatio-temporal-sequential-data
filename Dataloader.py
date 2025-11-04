@@ -72,6 +72,11 @@ Chosen columns for processing:
 import pandas as pd
 import pyarrow
 import pyarrow.parquet
+from geopy.distance import geodesic
+import cartopy.feature as cfeature
+from shapely.geometry import Point
+from shapely.ops import unary_union
+from shapely.prepared import prep
 
 class Dataloader:
     """A class for loading and preprocessing maritime spatio-temporal sequential data.
@@ -152,6 +157,60 @@ class Dataloader:
         valid_destinations = set(port_locodes["LOCODE"].str.upper().str.strip())
         df = df[df["Destination"].isin(valid_destinations)]
 
+        def detect_anomalies(df, max_speed_knots=50):
+            """Flag physically impossible movements and land positions"""
+            df = df.sort_values(['MMSI', 'Segment', 'Timestamp'])
+            
+            # Calculate distance between consecutive points
+            def calc_distance(group):
+                coords = list(zip(group['Latitude'], group['Longitude']))
+                distances = [geodesic(coords[i], coords[i+1]).km 
+                            for i in range(len(coords)-1)]
+                return [0] + distances  # First point has no previous point
+            
+            df['distance_km'] = df.groupby(['MMSI', 'Segment']).apply(
+                lambda g: calc_distance(g)
+            ).explode().values
+            
+            # Calculate time difference
+            df['time_diff_hours'] = df.groupby(['MMSI', 'Segment'])['Timestamp'].diff().dt.total_seconds() / 3600
+            
+            # Calculate implied speed
+            df['implied_speed_knots'] = (df['distance_km'] / df['time_diff_hours']) / 1.852
+            
+            # Flag speed anomalies
+            speed_anomaly = df['implied_speed_knots'] > max_speed_knots
+            
+            # === ADD: Check if positions are on land using cartopy ===
+            print("Loading land polygons from cartopy...")
+            land_geom = list(cfeature.LAND.geometries())
+            land = prep(unary_union(land_geom))
+            
+            print("Checking for land positions...")
+            def is_on_land(lat, lon):
+                point = Point(lon, lat)  # Shapely uses (lon, lat) order
+                return land.contains(point)
+            
+            # Apply to all rows
+            is_land = df.apply(lambda row: is_on_land(row['Latitude'], row['Longitude']), axis=1)
+            
+            # Combine both anomaly types
+            df['anomaly'] = speed_anomaly | is_land
+            
+            # Print statistics
+            print(f"Found {speed_anomaly.sum()} speed anomalies (>{max_speed_knots} knots)")
+            print(f"Found {is_land.sum()} land positions")
+            print(f"Total anomalies: {df['anomaly'].sum()}")
+            
+            return df
+
+        df = detect_anomalies(df, max_speed_knots=50)
+        anomalies = df[df["anomaly"] == True]
+        anomalies[["MMSI", "Segment"]]
+        # Now we delete every row in the dataframe with these MMSI and Segment combinations
+        # and keep only the segments without anomalies
+        df = df[~df.set_index(['MMSI', 'Segment']).index.isin(anomalies.set_index(['MMSI', 'Segment']).index)]
+
         # To reduce size, we dont keep data for the same ship that are within 10 minutes of each other
         # IMPORTANT: Downsample within each segment, not across segments
         def downsample_group(g):
@@ -161,8 +220,8 @@ class Dataloader:
             time_diffs = g["Timestamp"].diff().dt.total_seconds().fillna(600)  # First point always kept
             # diff() computes time between row[i] and row[i-1]
             # fillna(600) sets first point's diff to 600 seconds (always kept)
-            # 3. Keep only points that are >= 30 seconds apart
-            mask = time_diffs >= 0.5*60 # 30 seconds in seconds
+            # 3. Keep only points that are >= 10 seconds apart
+            mask = time_diffs >= 10 # 10 seconds in seconds
             # 4. Return filtered DataFrame
             return g[mask]
 
