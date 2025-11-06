@@ -77,15 +77,18 @@ import cartopy.feature as cfeature
 from shapely.geometry import Point
 from shapely.ops import unary_union
 from shapely.prepared import prep
+import zipfile
 
 class Dataloader:
     """A class for loading and preprocessing maritime spatio-temporal sequential data.
     It should get the data from a CSV file, clean it and convert it to a Parquet file for efficient storage and retrieval.
     Furthermore it should implement our scope of work in terms of data segmentation and feature engineering.
     """
-    def __init__(self, file_path: str, out_path: str):
+    def __init__(self, file_path: str, out_path: str, zip_path: str = None, csv_internal_path: str = None):
         self.file_path = file_path
         self.out_path = out_path
+        self.zip_path = zip_path
+        self.csv_internal_path = csv_internal_path
 
     def clean_data(self):
         dtypes = {
@@ -102,7 +105,18 @@ class Dataloader:
             "Destination": "object",
         }
         usecols = list(dtypes.keys())
-        df = pd.read_csv(self.file_path, usecols=usecols, dtype=dtypes)
+
+        # Read CSV: either from ZIP or from direct file path
+        if self.zip_path and self.csv_internal_path:
+            # Read from ZIP archive
+            with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
+                with zip_ref.open(self.csv_internal_path) as csv_file:
+                    df = pd.read_csv(csv_file, usecols=usecols, dtype=dtypes)
+        else:
+            # Read from direct file path
+            df = pd.read_csv(self.file_path, usecols=usecols, dtype=dtypes)
+
+        # df = pd.read_csv(self.file_path, usecols=usecols, dtype=dtypes)
 
         # Remove errors
         bbox = [60, 0, 50, 20]
@@ -153,7 +167,7 @@ class Dataloader:
             df = df[df["Destination"].notna() & (df["Destination"] != "") & (df["Destination"] != "UNKNOWN")]
 
         # Now we check the destinations if it exist in our port_locodes file:
-        port_locodes = pd.read_csv("../port_locodes.csv", sep=";")
+        port_locodes = pd.read_csv("port_locodes.csv", sep=";")
         valid_destinations = set(port_locodes["LOCODE"].str.upper().str.strip())
         df = df[df["Destination"].isin(valid_destinations)]
 
