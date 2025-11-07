@@ -84,7 +84,7 @@ class Dataloader:
     It should get the data from a CSV file, clean it and convert it to a Parquet file for efficient storage and retrieval.
     Furthermore it should implement our scope of work in terms of data segmentation and feature engineering.
     """
-    def __init__(self, file_path: str, out_path: str, zip_path: str = None, csv_internal_path: str = None):
+    def __init__(self, file_path: str = None, out_path: str = None, zip_path: str = None, csv_internal_path: str = None):
         self.file_path = file_path
         self.out_path = out_path
         self.zip_path = zip_path
@@ -251,19 +251,104 @@ class Dataloader:
             root_path=self.out_path,
             partition_cols=["MMSI", "Segment"]
         )
+        
+    def load_data(self, date_folders: list = None):
+        """
+        Load processed Parquet data from one or multiple date folders
+        
+        Args:
+            date_folders: List of folder names like ['aisdk-2023-01-15', 'aisdk-2023-03-15']
+                         If None, loads all folders in out_path
+        
+        Returns:
+            pd.DataFrame: Combined dataframe from all specified dates
+        """
+        import os
+        
+        if date_folders is None:
+            # Load all folders in out_path
+            date_folders = [f for f in os.listdir(self.out_path) 
+                           if os.path.isdir(os.path.join(self.out_path, f))]
+        
+        dfs = []
+        for folder in date_folders:
+            folder_path = os.path.join(self.out_path, folder)
+            if os.path.exists(folder_path):
+                print(f"Loading {folder}...")
+                dataset = pyarrow.parquet.ParquetDataset(folder_path)
+                table = dataset.read()
+                df = table.to_pandas()
+                dfs.append(df)
+            else:
+                print(f"Warning: {folder_path} does not exist, skipping...")
+        
+        if not dfs:
+            raise ValueError("No data loaded. Check your date_folders and out_path.")
+        
+        combined_df = pd.concat(dfs, ignore_index=True)
+        print(f"Loaded {len(combined_df)} total records from {len(dfs)} date folder(s)")
+        return combined_df
     
-    # def load_data(self):
-    #     dataset = pyarrow.parquet.ParquetDataset(self.out_path)
-    #     table = dataset.read()
-    #     df = table.to_pandas()
-    #     return df
+    def train_test_split(self, df: pd.DataFrame, prediction_horizon_hours: float = 2.0, test_size: float = 0.2):
+        """
+        Split data into train/test with last X hours removed for prediction task
+        
+        Args:
+            df: DataFrame loaded from load_data()
+            prediction_horizon_hours: How many hours to remove from end of routes
+            test_size: Proportion of segments to use for testing (0.0 to 1.0)
+        
+        Returns:
+            train_df, test_df: DataFrames ready for model training
+        """
+        import hashlib
+        
+        train_segments = []
+        test_segments = []
+        
+        # Calculate threshold for test split (e.g., 20% -> hash % 5 == 0)
+        test_threshold = int(1 / test_size)
+        
+        total_segments = 0
+        kept_segments = 0
+        
+        for (mmsi, segment), group in df.groupby(['MMSI', 'Segment']):
+            total_segments += 1
+            
+            # Ensure Timestamp is datetime
+            if not pd.api.types.is_datetime64_any_dtype(group['Timestamp']):
+                group['Timestamp'] = pd.to_datetime(group['Timestamp'])
+            
+            max_time = group['Timestamp'].max()
+            cutoff_time = max_time - pd.Timedelta(hours=prediction_horizon_hours)
+            
+            # Remove last X hours
+            partial_route = group[group['Timestamp'] <= cutoff_time].copy()
+            
+            if len(partial_route) > 256:  # Ensure minimum track length after cutting
+                kept_segments += 1
+                
+                # Preserve destination label from original route
+                partial_route.loc[:, 'Destination'] = group['Destination'].iloc[0]
+                
+                # Deterministic hash-based split (same MMSI+Segment always goes to same set)
+                hash_val = int(hashlib.md5(f"{mmsi}_{segment}".encode()).hexdigest(), 16)
+                
+                if hash_val % test_threshold == 0:
+                    test_segments.append(partial_route)
+                else:
+                    train_segments.append(partial_route)
+        
+        print(f"Total segments: {total_segments}")
+        print(f"Segments after {prediction_horizon_hours}h cutoff (len > 256): {kept_segments}")
+        print(f"Train segments: {len(train_segments)}")
+        print(f"Test segments: {len(test_segments)}")
+        
+        if not train_segments or not test_segments:
+            raise ValueError("Train or test set is empty! Adjust prediction_horizon_hours or check data.")
+        
+        train_df = pd.concat(train_segments, ignore_index=True)
+        test_df = pd.concat(test_segments, ignore_index=True)
+        
+        return train_df, test_df
     
-    # def train_test_split(self, df: pd.DataFrame, test_size: float = 0.2):
-    #     mmsis = df["MMSI"].unique()
-    #     n_test = int(len(mmsis) * test_size)
-    #     test_mmsis = set(mmsis[:n_test])
-    
-    #     train_df = df[~df["MMSI"].isin(test_mmsis)].reset_index(drop=True)
-    #     test_df = df[df["MMSI"].isin(test_mmsis)].reset_index(drop=True)
-    
-    #     return train_df, test_df
