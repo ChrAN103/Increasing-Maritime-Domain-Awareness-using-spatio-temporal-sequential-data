@@ -78,6 +78,7 @@ from shapely.geometry import Point
 from shapely.ops import unary_union
 from shapely.prepared import prep
 import zipfile
+from shapely.geometry import MultiPoint
 
 class Dataloader:
     """A class for loading and preprocessing maritime spatio-temporal sequential data.
@@ -150,9 +151,14 @@ class Dataloader:
         df = df.groupby("MMSI").filter(track_filter)
         df = df.sort_values(['MMSI', 'Timestamp'])
     
-        # Change: segment route if time gap >= 7.5 minutes
+        # Now we check the destinations if it exist in our port_locodes file:
+        port_locodes = pd.read_csv("port_locodes.csv", sep=";")
+        valid_destinations = set(port_locodes["LOCODE"].str.upper().str.strip())
+        df = df[df["Destination"].isin(valid_destinations)]
+
+        # # Change: segment route if time gap >= 7.5 minutes
         df['Segment'] = df.groupby('MMSI')['Timestamp'].transform(
-            lambda x: (x.diff().dt.total_seconds().fillna(0) >= 15/2 * 60).cumsum())
+            lambda x: (x.diff().dt.total_seconds().fillna(999999) >= 7.5 * 60).cumsum())
     
         df = df.groupby(["MMSI", "Segment"]).filter(track_filter)
         df = df.reset_index(drop=True)
@@ -166,26 +172,22 @@ class Dataloader:
             # Keep only non empty so we can actually use the route
             df = df[df["Destination"].notna() & (df["Destination"] != "") & (df["Destination"] != "UNKNOWN")]
 
-        # Now we check the destinations if it exist in our port_locodes file:
-        port_locodes = pd.read_csv("port_locodes.csv", sep=";")
-        valid_destinations = set(port_locodes["LOCODE"].str.upper().str.strip())
-        df = df[df["Destination"].isin(valid_destinations)]
+
 
         def detect_anomalies(df, max_speed_knots=50):
             """Flag physically impossible movements and land positions"""
             df = df.sort_values(['MMSI', 'Segment', 'Timestamp'])
             
             # Calculate distance between consecutive points
-            def calc_distance(group):
+            def calc_distance_safe(group):
                 coords = list(zip(group['Latitude'], group['Longitude']))
-                distances = [geodesic(coords[i], coords[i+1]).km 
-                            for i in range(len(coords)-1)]
-                return [0] + distances  # First point has no previous point
-            
-            df['distance_km'] = df.groupby(['MMSI', 'Segment']).apply(
-                lambda g: calc_distance(g)
-            ).explode().values
-            
+                distances = [0] + [geodesic(coords[i], coords[i+1]).km 
+                                for i in range(len(coords)-1)]
+                return pd.Series(distances, index=group.index)
+
+            df['distance_km'] = df.groupby(['MMSI', 'Segment'], group_keys=False).apply(
+                calc_distance_safe
+            )
             # Calculate time difference
             df['time_diff_hours'] = df.groupby(['MMSI', 'Segment'])['Timestamp'].diff().dt.total_seconds() / 3600
             
@@ -206,8 +208,10 @@ class Dataloader:
                 return land.contains(point)
             
             # Apply to all rows
-            is_land = df.apply(lambda row: is_on_land(row['Latitude'], row['Longitude']), axis=1)
-            
+            # is_land = df.apply(lambda row: is_on_land(row['Latitude'], row['Longitude']), axis=1)
+            points = [Point(lon, lat) for lon, lat in zip(df['Longitude'], df['Latitude'])]
+            is_land = pd.Series([land.contains(p) for p in points], index=df.index)
+
             # Combine both anomaly types
             df['anomaly'] = speed_anomaly | is_land
             
@@ -223,8 +227,9 @@ class Dataloader:
         anomalies[["MMSI", "Segment"]]
         # Now we delete every row in the dataframe with these MMSI and Segment combinations
         # and keep only the segments without anomalies
-        df = df[~df.set_index(['MMSI', 'Segment']).index.isin(anomalies.set_index(['MMSI', 'Segment']).index)]
-
+        # df = df[~df.set_index(['MMSI', 'Segment']).index.isin(anomalies.set_index(['MMSI', 'Segment']).index)]
+        # After removing anomalies, drop temporary columns
+        df = df.drop(columns=['distance_km', 'time_diff_hours', 'implied_speed_knots', 'anomaly'])
         # To reduce size, we dont keep data for the same ship that are within 10 minutes of each other
         # IMPORTANT: Downsample within each segment, not across segments
         def downsample_group(g):
