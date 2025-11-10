@@ -323,7 +323,9 @@ class Dataloader:
             cutoff_time = max_time - pd.Timedelta(hours=prediction_horizon_hours)
             
             # Remove last X hours
-            partial_route = group[group['Timestamp'] <= cutoff_time].copy()
+            # If max_time is 14:00 and we want to remove 2 hours, cutoff is 12:00
+            # We keep all timestamps < 12:00 (the early part of the route)
+            partial_route = group[group['Timestamp'] < cutoff_time].copy()
             
             if len(partial_route) > 256:  # Ensure minimum track length after cutting
                 kept_segments += 1
