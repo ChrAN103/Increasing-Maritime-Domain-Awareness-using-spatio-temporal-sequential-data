@@ -223,13 +223,23 @@ class Dataloader:
             return df
 
         df = detect_anomalies(df, max_speed_knots=50)
-        anomalies = df[df["anomaly"] == True]
-        anomalies[["MMSI", "Segment"]]
-        # Now we delete every row in the dataframe with these MMSI and Segment combinations
-        # and keep only the segments without anomalies
-        # df = df[~df.set_index(['MMSI', 'Segment']).index.isin(anomalies.set_index(['MMSI', 'Segment']).index)]
+
+
+        # Get unique (MMSI, Segment) combinations with anomalies
+        anomalous_segments = df[df["anomaly"] == True][['MMSI', 'Segment']].drop_duplicates()
+
+        print(f"Removing {len(anomalous_segments)} segments with anomalies...")
+
+        # Remove ALL rows belonging to those segments
+        df = df[~df.set_index(['MMSI', 'Segment']).index.isin(
+            anomalous_segments.set_index(['MMSI', 'Segment']).index
+        )]
+
+        print(f"Remaining rows after anomaly removal: {len(df)}")
+
         # After removing anomalies, drop temporary columns
         df = df.drop(columns=['distance_km', 'time_diff_hours', 'implied_speed_knots', 'anomaly'])
+        
         # To reduce size, we dont keep data for the same ship that are within 10 minutes of each other
         # IMPORTANT: Downsample within each segment, not across segments
         def downsample_group(g):
