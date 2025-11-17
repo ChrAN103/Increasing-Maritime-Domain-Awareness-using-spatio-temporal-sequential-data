@@ -175,7 +175,7 @@ class Dataloader:
 
 
         def detect_anomalies(df, max_speed_knots=50):
-            """Flag physically impossible movements and land positions"""
+            """Flag physically impossible movements based on implied speed between consecutive points."""
             df = df.sort_values(['MMSI', 'Segment', 'Timestamp'])
             
             # Calculate distance between consecutive points
@@ -197,28 +197,10 @@ class Dataloader:
             # Flag speed anomalies
             speed_anomaly = df['implied_speed_knots'] > max_speed_knots
             
-            # === ADD: Check if positions are on land using cartopy ===
-            print("Loading land polygons from cartopy...")
-            land_geom = list(cfeature.LAND.geometries())
-            land = prep(unary_union(land_geom))
-            
-            print("Checking for land positions...")
-            def is_on_land(lat, lon):
-                point = Point(lon, lat)  # Shapely uses (lon, lat) order
-                return land.contains(point)
-            
-            # Apply to all rows
-            # is_land = df.apply(lambda row: is_on_land(row['Latitude'], row['Longitude']), axis=1)
-            points = [Point(lon, lat) for lon, lat in zip(df['Longitude'], df['Latitude'])]
-            is_land = pd.Series([land.contains(p) for p in points], index=df.index)
-
-            # Combine both anomaly types
-            df['anomaly'] = speed_anomaly | is_land
+            df['anomaly'] = speed_anomaly
             
             # Print statistics
             print(f"Found {speed_anomaly.sum()} speed anomalies (>{max_speed_knots} knots)")
-            print(f"Found {is_land.sum()} land positions")
-            print(f"Total anomalies: {df['anomaly'].sum()}")
             
             return df
 
