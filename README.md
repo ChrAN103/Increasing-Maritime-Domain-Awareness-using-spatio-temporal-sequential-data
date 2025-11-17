@@ -2,12 +2,11 @@
 Project for Deep Learning course DTU
 
 
-## Problem: 
-This project focus on the  " Trajectory forecasting " part of the AIS dataset 
+## Mac OS folder 
 
-## Scope: 
-- This text should describe the scope of the problem. 
+The mac os folder is configured with uv instead of pip. 
 
-## Data description: 
-- This text should hold a description of the data 
 
+## Links: \
+Paper on classification: \
+https://arxiv.org/pdf/2202.07125
