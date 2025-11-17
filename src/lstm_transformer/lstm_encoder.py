@@ -7,7 +7,9 @@ class LSTMPositionalEncoding(nn.Module):
         self.input_size = kwargs.get('input_size')
         self.hidden_size = kwargs.get('hidden_size')
         self.num_layers = kwargs.get('num_layers')  
-        self.batch_first = kwargs.get('batch_first', True)  
+        self.batch_first = kwargs.get('batch_first', True)   
+
+        self.output_size = self.hidden_size 
 
         # Define LSTM layer
         self.encoder_lstm = nn.LSTM(
@@ -21,13 +23,8 @@ class LSTMPositionalEncoding(nn.Module):
         self.norm_output = nn.LayerNorm(self.hidden_size) 
 
 
-
-        self.seq = nn.Sequential(
-            self.norm_input,
-            self.encoder_lstm, 
-            self.norm_output
-        )
-
     def forward(self, x): 
+        x = self.norm_input(x)
         output, _ = self.encoder_lstm(x)
+        output = self.norm_output(output)
         return output
