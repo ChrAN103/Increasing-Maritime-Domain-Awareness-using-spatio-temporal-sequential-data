@@ -208,7 +208,7 @@ class DataProcessor:
                     train_segments.append(partial_route)
         
         print(f"Total segments: {total_segments}")
-        print(f"Segments after {prediction_horizon_minutes}h cutoff (len > 256): {kept_segments}")
+        # print(f"Segments after {prediction_horizon_minutes}h cutoff (len > 256): {kept_segments}")
         print(f"Train segments: {len(train_segments)}")
         print(f"validation segments: {len(validation_segments)}")
         
