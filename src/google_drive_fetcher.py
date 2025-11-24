@@ -7,24 +7,17 @@ from typing import List, Dict, Optional, Union
 
 
 class GoogleDriveFetcher:
-    """
-    Fetch files and list directories from Google Drive using share URLs.
 
-    Supports:
-      - Listing files and folders in a directory
-      - Downloading individual files
-      - Navigating into subdirectories
-      
-    URL formats supported:
-      - https://drive.google.com/file/d/<FILE_ID>/view?usp=sharing
-      - https://drive.google.com/drive/folders/<FOLDER_ID>
-      - https://drive.google.com/open?id=<FILE_ID>
-      - https://drive.google.com/uc?id=<FILE_ID>&export=download
-    """
 
-    def __init__(self, session: Optional[requests.Session] = None):
+    def __init__(self, session: Optional[requests.Session] = None, baseurl_folder: str = "https://drive.google.com/drive/folders"):
         # Reuse a session if provided (e.g. for auth/cookies), else make a new one
         self.session = session or requests.Session() 
+
+        self.baseurl_folder = baseurl_folder
+        self.inital_folder = baseurl_folder + "/1oWDXaQPOcnVF8I_bFHrVIYTspjE-eBD_?hl=da"
+        self.all_folders = self.list_directory(self.inital_folder)
+        self.folder_names = [folder['name'] for folder in self.all_folders]
+        self.folder_dict = None
 
 
     def _extract_file_id(self, url: str) -> str:
@@ -290,6 +283,101 @@ class GoogleDriveFetcher:
                     return self.fetch_to_file(item['url'], dst_path)
         
         return None
+    
+    def download_folder(self, foldername: str) -> List[pd.DataFrame]: 
+        """
+        Download all parquet files from a folder and its subfolders recursively.
+        
+        Args:
+            foldername: Name of the folder to download from (must exist in parent directory)
+            
+        Returns:
+            List of DataFrames containing the downloaded parquet files
+        """
+        if not self.folder_exist(foldername): 
+            print(f"{foldername} did not exist")
+            return None
+        
+        # Get the folder URL from the parent directory
+        folder_url = self.get_folder_url(foldername)
+        
+        # Get all items in this folder
+        items = self.list_directory(folder_url)
+        
+        # Recursively download files
+        files = self._recursive_download_from_items(items)
+        return files 
+    
+    def _recursive_download_from_items(self, items: List[Dict]) -> List[pd.DataFrame]:
+        """
+        Recursively download parquet files from a list of items.
+        
+        Args:
+            items: List of item dictionaries from list_directory()
+            
+        Returns:
+            List of DataFrames
+        """
+        files = []
+        
+        for item in items:
+            # Check if this is a parquet file (has 'Binary' in name)
+            if item['type'] == 'file' and 'Binary' in item['name'] and '.parquet' in item['name']:
+                try:
+                    df = self.fetch_parquet_to_dataframe(item['url'])
+                    files.append(df)
+                    print(f"Downloaded: {item['name']} ({len(df)} rows)")
+                except Exception as e:
+                    print(f"Failed to download {item['name']}: {e}")
+            
+            # If it's a folder (not a file), recursively download from it
+            elif 'Shared folder' in item['name']:
+                try:
+                    sub_items = self.list_directory(item['url'])
+                    sub_files = self._recursive_download_from_items(sub_items)
+                    files.extend(sub_files)
+                except Exception as e:
+                    print(f"Failed to access folder {item['name']}: {e}")
+        
+        return files 
+    
+    def get_folder_url(self, foldername: str) -> str:
+        """
+        Get the proper Google Drive URL for a folder by its name.
+        Only searches in the initial parent folder (self.all_folders).
+        """
+        # Find the folder item in all_folders that matches the name
+        for folder in self.all_folders:
+            if folder['name'] == foldername:
+                # Return the URL directly from the folder item
+                return folder['url']
+        
+        # If not found, raise an error
+        raise ValueError(f"Folder '{foldername}' not found in parent directory")
+    
+    def folder_exist(self, foldername: str) -> bool: 
+        #make it such that it only appears in the name 
+        exists = False 
+        for name in self.folder_names:
+            if foldername in name: 
+                exists = True
+        return exists
+
+ 
+
+
+
+
+            
+            
+
+                
+
+
+    
+        
+
+    
 
 
 if __name__ == "__main__":
