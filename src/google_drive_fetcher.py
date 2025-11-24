@@ -9,12 +9,12 @@ from typing import List, Dict, Optional, Union
 class GoogleDriveFetcher:
 
 
-    def __init__(self, session: Optional[requests.Session] = None, baseurl_folder: str = "https://drive.google.com/drive/folders"):
+    def __init__(self, session: Optional[requests.Session] = None, URL: str = "https://drive.google.com/drive/folders"):
         # Reuse a session if provided (e.g. for auth/cookies), else make a new one
         self.session = session or requests.Session() 
 
-        self.baseurl_folder = baseurl_folder
-        self.inital_folder = baseurl_folder + "/1oWDXaQPOcnVF8I_bFHrVIYTspjE-eBD_?hl=da"
+        self.baseurl_folder = URL
+        self.inital_folder = URL 
         self.all_folders = self.list_directory(self.inital_folder)
         self.folder_names = [folder['name'] for folder in self.all_folders]
         self.folder_dict = None
