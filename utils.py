@@ -108,17 +108,18 @@ def plot_trajectory_on_map(df, percentage_of_vessels=0.5):
     return m
 
 class MaritimeDataset(Dataset):
-    def __init__(self, df, port_encoder=None, feature_scaler=None, max_len=500):
+    def __init__(self, df, port_encoder=None, ship_type_encoder=None, feature_scaler=None, max_len=500):
         """
         Args:
             df: DataFrame containing the ship trajectories
             port_encoder: Fitted LabelEncoder for destinations (optional)
+            ship_type_encoder: Fitted LabelEncoder for ship types (optional)
             feature_scaler: Fitted StandardScaler for features (optional)
             max_len: Maximum sequence length to truncate to
         """
         self.max_len = max_len
         
-        # 1. Encode Destinations (Targets)
+        # 1. Encode Destinations (Targets) and categorical features
         if port_encoder is None:
             self.port_encoder = LabelEncoder()
             # Fit on all unique destinations in the dataframe
@@ -126,9 +127,16 @@ class MaritimeDataset(Dataset):
         else:
             self.port_encoder = port_encoder
                    
+        # Encode 'Ship type' categorical feature
+        if ship_type_encoder is None:
+            self.ship_type_encoder = LabelEncoder()
+            unique_types = df['Ship type'].fillna('Undefined').astype(str).unique()
+            self.ship_type_encoder.fit(unique_types)
+        else:
+            self.ship_type_encoder = ship_type_encoder
+
         # We work on a copy to avoid modifying the original dataframe
         df_clean = df.copy()
-
 
         # --- CYCLICAL ENCODING FOR COG ---
         # Convert degrees to radians
@@ -139,10 +147,23 @@ class MaritimeDataset(Dataset):
         df_clean['sin_COG'] = np.sin(cog_rad)
         df_clean['cos_COG'] = np.cos(cog_rad)
         
+        # --- TRANSFORM SHIP TYPE ---
+        # Fill NaNs
+        s_types = df_clean['Ship type'].fillna('Undefined').astype(str)
+        
+        # Handle unseen labels in Test set (map to the first known class to prevent crash)
+        known_types = set(self.ship_type_encoder.classes_)
+        s_types = s_types.apply(lambda x: x if x in known_types else list(known_types)[0])
+        
+        # Transform to integers
+        df_clean['Ship type'] = self.ship_type_encoder.transform(s_types)
+
         # 2. Prepare Features
-        # Select numerical features to use
-        # We REMOVE 'COG' and ADD 'sin_COG', 'cos_COG' instead
-        self.feature_cols = ['Latitude', 'Longitude', 'SOG', 'sin_COG', 'cos_COG', 'Length', 'Width']
+        # Split into columns that need scaling vs those that don't
+        self.cols_to_scale = ['Latitude', 'Longitude', 'SOG', 'Length', 'Width']
+        self.cols_no_scale = ['sin_COG', 'cos_COG', 'Ship type'] # Don't scale integers/cyclical
+
+        self.feature_cols = self.cols_to_scale + self.cols_no_scale
 
         # Handle missing values for linear features by filling with 0 (just as a backup incase it previously slipped through)
         for col in self.feature_cols:
@@ -153,10 +174,13 @@ class MaritimeDataset(Dataset):
         # Normalize features
         if feature_scaler is None:
             self.feature_scaler = StandardScaler()
-            self.feature_scaler.fit(df_clean[self.feature_cols].values)
+            self.feature_scaler.fit(df_clean[self.cols_to_scale].values)
         else:
             self.feature_scaler = feature_scaler
-            
+
+        # Apply scaling globally (faster)
+        df_clean[self.cols_to_scale] = self.feature_scaler.transform(df_clean[self.cols_to_scale].values)
+
         # 3. Group by Trajectory (MMSI + Segment)
         # We create a list of (features, target) tuples
         self.sequences = []
