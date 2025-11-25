@@ -216,11 +216,9 @@ def setup_and_train(train_df, val_df, test_df, model):
     return trained_model
 
 if __name__ == "__main__":
-    path = "../data/processed_data_filterdest"
+    path = "../data/processed_data"
     dataloader = Dataloader(out_path=path)
-    import os
-    files = os.listdir(path)
-    df = dataloader.load_data(date_folders=files[0:10])  # load all files in the processed_data folderS
+    df = dataloader.load_data()  # load all files in the processed_data folderS
     # Ensure ship and segment can be told apart by adding column for date
     df['Date'] = df['Timestamp'].dt.date
     df = overhaul_segments(df)
