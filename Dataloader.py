@@ -117,21 +117,15 @@ class Dataloader:
             # Read from direct file path
             df = pd.read_csv(self.file_path, usecols=usecols, dtype=dtypes)
 
-        # df = pd.read_csv(self.file_path, usecols=usecols, dtype=dtypes)
-
         # Remove errors
         bbox = [60, 0, 50, 20]
         north, west, south, east = bbox
         df = df[(df["Latitude"] <= north) & (df["Latitude"] >= south) & 
                 (df["Longitude"] >= west) & (df["Longitude"] <= east)]
     
-        # CHANGED: Keep the Type of mobile column, just filter it
-        # df = df[df["Type of mobile"].isin(["Class A", "Class B"])]
-        # Don't drop it: .drop(columns=["Type of mobile"])
-
         # Keep Class A only (better data quality for commercial routes)
         df = df[df["Type of mobile"] == "Class A"]
-        # Perhaps remove the entire coloumn hereafter? All not class A ships are removed
+        # Remove the entire coloumn. All not class A ships are removed
         df = df.drop(columns=["Type of mobile"])
 
         df = df[df["MMSI"].str.len() == 9]
@@ -156,7 +150,7 @@ class Dataloader:
         valid_destinations = set(port_locodes["LOCODE"].str.upper().str.strip())
         df = df[df["Destination"].isin(valid_destinations)]
 
-        # # Change: segment route if time gap >= 7.5 minutes
+        # # Segment route if time gap >= 7.5 minutes
         df['Segment'] = df.groupby('MMSI')['Timestamp'].transform(
             lambda x: (x.diff().dt.total_seconds().fillna(999999) >= 7.5 * 60).cumsum())
     
@@ -166,7 +160,7 @@ class Dataloader:
         knots_to_ms = 0.514444
         df["SOG"] = knots_to_ms * df["SOG"]
     
-        # ADD: Clean destination field for port labels
+        # Double check: Clean destination field for non port labels
         if "Destination" in df.columns:
             df["Destination"] = df["Destination"].str.upper().str.strip()
             # Keep only non empty so we can actually use the route
@@ -222,8 +216,7 @@ class Dataloader:
         # After removing anomalies, drop temporary columns
         df = df.drop(columns=['distance_km', 'time_diff_hours', 'implied_speed_knots', 'anomaly'])
         
-        # To reduce size, we dont keep data for the same ship that are within 10 minutes of each other
-        # IMPORTANT: Downsample within each segment, not across segments
+        # To reduce size, we dont keep data for the same ship that are within 10 seconds of each other
         def downsample_group(g):
             # 1. Sort by time (ensure chronological order)
             g = g.sort_values("Timestamp")
