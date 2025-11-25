@@ -8,6 +8,48 @@ import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from Dataloader import Dataloader
 from utils import overhaul_segments, MaritimeDataset
+from shapely import wkt
+import geopandas as gpd
+
+def filter_destination(df, ports):
+    #set destination outside of ports to 'transit'
+    df['Destination'] = df['Destination'].apply(lambda x: x if x in ports['LOCODE'].values else 'transit')
+    return df
+
+def find_ports():
+    # 1. Load CSV
+    locodes = pd.read_csv("port_locodes.csv", sep=";")
+
+    # 2. Clean the data: Drop rows where POLYGON is missing (NaN)
+    locodes = locodes.dropna(subset=['POLYGON'])
+
+    # 3. Convert to WKT
+    # The function wraps the coordinate pairs in the standard WKT format
+    def to_wkt_polygon(coord_string):
+        return f"POLYGON(({coord_string}))"
+
+    locodes['WKT'] = locodes['POLYGON'].apply(to_wkt_polygon)
+    locodes['geometry'] = locodes['WKT'].apply(wkt.loads)
+
+    # 4. Convert to GeoDataFrame
+    ports_gdf = gpd.GeoDataFrame(locodes, geometry='geometry', crs="EPSG:4326")
+
+    # 5. Calculate Lat/Lon for filtering
+    ports_gdf["Latitude"] = ports_gdf.geometry.centroid.y
+    ports_gdf["Longitude"] = ports_gdf.geometry.centroid.x
+
+    # 6. Filter by Bbox
+    bbox = [60, 0, 50, 20] # North, West, South, East
+    north, west, south, east = bbox
+
+    ports = ports_gdf[
+        (ports_gdf["Latitude"] <= north) & 
+        (ports_gdf["Latitude"] >= south) & 
+        (ports_gdf["Longitude"] >= west) & 
+        (ports_gdf["Longitude"] <= east)
+    ]
+
+    return ports
 
 def collate_fn(batch):
     """
@@ -179,6 +221,7 @@ if __name__ == "__main__":
     df = overhaul_segments(df)
     df.drop(columns=['Segment'], inplace=True)
     df.rename(columns={"Segment_ID": "Segment"}, inplace=True)
+    df = filter_destination(df, find_ports())
     print("Data loaded and segments overhauled.")
     # This prepares the data by removing the last X hours from test routes
     train_df, test_df = dataloader.train_test_split(df = df, prediction_horizon_hours=2.0)
