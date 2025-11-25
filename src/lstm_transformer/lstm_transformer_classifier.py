@@ -1,6 +1,7 @@
 from torch import nn 
 from .lstm_encoder import LSTMPositionalEncoding
-from .timeseries_transformer import TimeSeriesTransformer
+from .timeseries_transformer import TimeSeriesTransformer 
+from .classifier import Classifier
 
 class LSTMTransformerClassifier(nn.Module):
     def __init__(self, **kwargs):
@@ -13,8 +14,10 @@ class LSTMTransformerClassifier(nn.Module):
         self.num_transformer_layers = kwargs.get('num_transformer_layers')
         self.output_size = kwargs.get('output_size')
         self.batch_first = kwargs.get('batch_first', True)
+        self.dropout = kwargs.get('dropout', 0.1)
 
-        # LSTM Positional Encoding
+
+        # LSTM Positional Encoding & Embedder
         self.lstm_positional_encoding = LSTMPositionalEncoding(
             input_size=self.input_size,
             hidden_size=self.hidden_size,
@@ -24,13 +27,31 @@ class LSTMTransformerClassifier(nn.Module):
 
         # Transformer 
         self.transformer_encoder = TimeSeriesTransformer(
-            positional_encoding=self.lstm_positional_encoding,
+            input_size=self.hidden_size,
             num_heads=self.num_heads,
             num_layers=self.num_transformer_layers,
-            output_size=self.output_size,
             batch_first=self.batch_first
         )
 
-    def forward(self, x):
-        x = self.transformer_encoder(x)
+        # Classifier
+        self.classifier = Classifier(
+            input_size=self.hidden_size,
+            hidden_size=self.hidden_size,
+            output_size=self.output_size,
+        )
+
+        self.dropout_layer = nn.Dropout(p=self.dropout)
+
+    def forward(self, x, mask=None):
+        
+        x = self.lstm_positional_encoding(x)
+
+        x = self.dropout_layer(x)
+        x = self.transformer_encoder(x, mask=mask)
+
+        # preform pooling 
+        x = x.mean(dim=1)  # Mean pooling over the sequence length dimension
+
+        x = self.dropout_layer(x)
+        x = self.classifier(x)
         return x
