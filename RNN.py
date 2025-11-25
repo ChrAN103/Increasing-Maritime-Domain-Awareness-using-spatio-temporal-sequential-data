@@ -14,7 +14,7 @@ import geopandas as gpd
 def filter_destination(df, ports, drop_destinations=False):
     #set destination outside of ports to 'transit'
     if drop_destinations:
-        df = df[~df['Destination'].isin(ports['LOCODE'])]
+        df = df[df['Destination'].isin(ports['LOCODE'])]
     else:
         df['Destination'] = df['Destination'].where(df['Destination'].isin(ports['LOCODE']), 'transit')
     return df
