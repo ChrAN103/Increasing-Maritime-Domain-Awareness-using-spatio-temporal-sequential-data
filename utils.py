@@ -224,3 +224,14 @@ class MaritimeDataset(Dataset):
     def __getitem__(self, idx):
         return self.sequences[idx], self.targets[idx]
 
+
+def get_device():
+    device = torch.device("cpu")
+
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+        
+    return device

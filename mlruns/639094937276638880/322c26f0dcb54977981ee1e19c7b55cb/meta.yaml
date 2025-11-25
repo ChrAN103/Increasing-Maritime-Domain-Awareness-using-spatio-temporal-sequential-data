@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/madshaakonsson/Desktop/DL/marinetime-project/mlruns/639094937276638880/322c26f0dcb54977981ee1e19c7b55cb/artifacts
+end_time: 1764095739041
+entry_point_name: ''
+experiment_id: '639094937276638880'
+lifecycle_stage: active
+run_id: 322c26f0dcb54977981ee1e19c7b55cb
+run_name: LSTM_Transformer-Run
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1764095717583
+status: 4
+tags: []
+user_id: madshaakonsson

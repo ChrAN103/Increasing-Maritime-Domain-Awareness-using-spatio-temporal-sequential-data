@@ -1,5 +1,5 @@
 from torch import nn
-
+from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence
 class LSTMPositionalEncoding(nn.Module):
     def __init__(self, **kwargs):
         super().__init__()
@@ -8,6 +8,7 @@ class LSTMPositionalEncoding(nn.Module):
         self.hidden_size = kwargs.get('hidden_size')
         self.num_layers = kwargs.get('num_layers')  
         self.batch_first = kwargs.get('batch_first', True)   
+        self.dropout = kwargs.get('dropout', 0.1)
 
         self.output_size = self.hidden_size 
 
@@ -16,15 +17,19 @@ class LSTMPositionalEncoding(nn.Module):
             input_size=self.input_size,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
-            batch_first=self.batch_first 
+            batch_first=self.batch_first,
+            dropout=self.dropout
         ) 
-        #Define normalization 
-        self.norm_input = nn.LayerNorm(self.input_size)
-        self.norm_output = nn.LayerNorm(self.hidden_size) 
 
 
-    def forward(self, x): 
-        x = self.norm_input(x)
-        output, _ = self.encoder_lstm(x)
-        output = self.norm_output(output)
-        return output
+
+    def forward(self, x, lengths): 
+
+        packed_x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+
+        packed_out, (hn, _) = self.encoder_lstm(packed_x)
+
+        out, out_lengths = pad_packed_sequence(packed_out, batch_first=True)
+
+   
+        return out
