@@ -298,8 +298,7 @@ class Dataloader:
         Returns:
             train_df, test_df: DataFrames ready for model training
         """
-        import hashlib
-        
+       
         train_segments = []
         test_segments = []
         
@@ -316,24 +315,27 @@ class Dataloader:
             if not pd.api.types.is_datetime64_any_dtype(group['Timestamp']):
                 group['Timestamp'] = pd.to_datetime(group['Timestamp'])
             
-            max_time = group['Timestamp'].max()
-            cutoff_time = max_time - pd.Timedelta(hours=prediction_horizon_hours)
-            
-            # Remove last X hours
-            # If max_time is 14:00 and we want to remove 2 hours, cutoff is 12:00
-            # We keep all timestamps < 12:00 (the early part of the route)
-            partial_route = group[group['Timestamp'] < cutoff_time].copy()
-            
+            if prediction_horizon_hours > 0:
+                max_time = group['Timestamp'].max()
+                cutoff_time = max_time - pd.Timedelta(hours=prediction_horizon_hours)
+                
+                # Remove last X hours
+                # If max_time is 14:00 and we want to remove 2 hours, cutoff is 12:00
+                # We keep all timestamps < 12:00 (the early part of the route)
+                partial_route = group[group['Timestamp'] < cutoff_time].copy()
+            else:
+                # Keep full route
+                partial_route = group.copy()
+                       
             if len(partial_route) > 256:  # Ensure minimum track length after cutting
                 kept_segments += 1
                 
                 # Preserve destination label from original route
                 partial_route.loc[:, 'Destination'] = group['Destination'].iloc[0]
                 
-                # Deterministic hash-based split (same MMSI+Segment always goes to same set)
-                hash_val = int(hashlib.md5(f"{mmsi}_{segment}".encode()).hexdigest(), 16)
-                
-                if hash_val % test_threshold == 0:
+                # CHANGED: Use counter-based split (Round Robin) instead of Hash
+                # This ensures that even if we split an already-split dataset, we still get a valid test set.
+                if kept_segments % test_threshold == 0:
                     test_segments.append(partial_route)
                 else:
                     train_segments.append(partial_route)
