@@ -201,9 +201,7 @@ class MaritimeDataset(Dataset):
             # Double check for any remaining NaNs or Infs that fucks with StandardScaler 
             if np.isnan(feats).any() or np.isinf(feats).any():
                 continue
-            
-            feats = self.feature_scaler.transform(feats)
-            
+                        
             # Truncate if too long (good for memory and our PC's will thank us)
             if len(feats) > self.max_len:
                 feats = feats[-self.max_len:]
