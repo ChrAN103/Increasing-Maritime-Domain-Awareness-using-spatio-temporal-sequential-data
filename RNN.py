@@ -11,9 +11,12 @@ from utils import overhaul_segments, MaritimeDataset
 from shapely import wkt
 import geopandas as gpd
 
-def filter_destination(df, ports):
+def filter_destination(df, ports, drop_destinations=False):
     #set destination outside of ports to 'transit'
-    df['Destination'] = df['Destination'].apply(lambda x: x if x in ports['LOCODE'].values else 'transit')
+    if drop_destinations:
+        df = df[~df['Destination'].isin(ports['LOCODE'])]
+    else:
+        df['Destination'] = df['Destination'].where(df['Destination'].isin(ports['LOCODE']), 'transit')
     return df
 
 def find_ports():
@@ -213,9 +216,11 @@ def setup_and_train(train_df, val_df, test_df, model):
     return trained_model
 
 if __name__ == "__main__":
-    path = "../data/processed_data"
+    path = "../data/processed_data_filterdest"
     dataloader = Dataloader(out_path=path)
-    df = dataloader.load_data()  # load all files in the processed_data folder
+    import os
+    files = os.listdir(path)
+    df = dataloader.load_data(date_folders=files[0:10])  # load all files in the processed_data folderS
     # Ensure ship and segment can be told apart by adding column for date
     df['Date'] = df['Timestamp'].dt.date
     df = overhaul_segments(df)
