@@ -13,7 +13,7 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from Dataloader import Dataloader
-from utils import overhaul_segments, MaritimeDataset, get_device
+from utils import overhaul_segments, MaritimeDataset, get_device, add_destination_port
 from shapely import wkt
 import geopandas as gpd
 from src.lstm_transformer.lstm_transformer_classifier import LSTMTransformerClassifier  
@@ -46,20 +46,11 @@ def find_ports():
     # 4. Convert to GeoDataFrame
     ports_gdf = gpd.GeoDataFrame(locodes, geometry='geometry', crs="EPSG:4326")
 
-    # 5. Calculate Lat/Lon for filtering
-    ports_gdf["Latitude"] = ports_gdf.geometry.centroid.y
-    ports_gdf["Longitude"] = ports_gdf.geometry.centroid.x
 
     # 6. Filter by Bbox
     bbox = [60, 0, 50, 20] # North, West, South, East
     north, west, south, east = bbox
-
-    ports = ports_gdf[
-        (ports_gdf["Latitude"] <= north) & 
-        (ports_gdf["Latitude"] >= south) & 
-        (ports_gdf["Longitude"] >= west) & 
-        (ports_gdf["Longitude"] <= east)
-    ]
+    ports = ports_gdf.cx[west:east, south:north]
 
     return ports
 
@@ -74,7 +65,7 @@ def collate_fn(batch):
     sequences, targets = zip(*batch)
     
     # Get lengths of each sequence
-    lengths = torch.tensor([len(seq) for seq in sequences])
+    lengths = torch.tensor([seq.size(0) for seq in sequences], dtype=torch.long)
     
     # Pad sequences (batch_first=True makes it [Batch, Seq, Feat])
     padded_seqs = pad_sequence(sequences, batch_first=True, padding_value=-1000) # Use a unlikely padding value according to standardization as we use StandardScaler
@@ -127,7 +118,7 @@ class LSTM(nn.Module):
         out = self.fc_head(final_hidden)
         return out
 
-def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.001):
+def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.001, output_size=None):
     best_val_accuracy = float('-inf') 
 
     device = get_device()
@@ -135,7 +126,9 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
     print(f"Training on {device}")
     
     model = model.to(device)
-    criterion = nn.CrossEntropyLoss()
+    weights =torch.ones(output_size)
+    weights[99] = 0.3
+    criterion = nn.CrossEntropyLoss(weight=weights.to(device))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     model.train()
     
@@ -164,10 +157,10 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}") 
 
-        mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
+        # mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
         
         
-        # Validation 
+        # Validation
         if val_loader:
             evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
             
@@ -178,18 +171,66 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
     correct = 0
     total = 0
     
+    # --- New Metrics ---
+    no_port_id = 99  # <--- ASSUME 'no_port' CLASS ID IS 0. ADJUST IF NECESSARY.
+    
+    no_port_predictions = 0
+    
+    port_correct = 0
+    port_total = 0 # Total samples that are NOT 'no_port' (i.e., targets != no_port_id)
+    # -------------------
+    
     with torch.no_grad():
         for sequences, lengths, targets in val_loader:
             sequences, targets = sequences.to(device), targets.to(device)
             outputs = model(sequences, lengths=lengths)
             _, predicted = torch.max(outputs.data, 1)
+            
+            # --- Standard Accuracy Calculation ---
             total += targets.size(0)
             correct += (predicted == targets).sum().item()
+            # -------------------------------------
+            
+            # --- Granular Metrics Calculation ---
+            
+            # 1. Count 'no_port' predictions
+            no_port_predictions += (predicted == no_port_id).sum().item()
+            
+            # 2. Identify samples that are actually 'port' (i.e., not 'no_port')
+            is_port_target = (targets != no_port_id)
+            port_total += is_port_target.sum().item()
+            
+            # 3. Calculate 'port' accuracy (correct predictions ONLY for the port classes)
+            # Find correct predictions where the target IS a port (not no_port)
+            port_correct += ((predicted == targets) & is_port_target).sum().item()
+            # ------------------------------------
             
     val_accuracy = 100 * correct / total if total > 0 else 0
-    print(f'Validation Accuracy: {val_accuracy:.2f}%')
+    
+    # Calculate accuracy for port classes only
+    port_accuracy = 100 * port_correct / port_total if port_total > 0 else 0
+    
+    print(f'Validation Accuracy (All): {val_accuracy:.2f}%')
+    print(f'Total "no_port" predictions: {no_port_predictions}')
+    print(f'Port-Specific Accuracy (Targets != no_port): {port_accuracy:.2f}%')
 
-    mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
+# def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf')):
+#     model.eval()
+#     correct = 0
+#     total = 0
+    
+#     with torch.no_grad():
+#         for sequences, lengths, targets in val_loader:
+#             sequences, targets = sequences.to(device), targets.to(device)
+#             outputs = model(sequences, lengths=lengths)
+#             _, predicted = torch.max(outputs.data, 1)
+#             total += targets.size(0)
+#             correct += (predicted == targets).sum().item()
+            
+#     val_accuracy = 100 * correct / total if total > 0 else 0
+#     print(f'Validation Accuracy: {val_accuracy:.2f}%')
+
+#     mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
 
     # # Save the best model 
     # if (val_accuracy > best_val_accuracy):
@@ -212,7 +253,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
                                  feature_scaler=train_dataset.feature_scaler)
 
     # 2. Create DataLoaders
-    workers = max(1, os.cpu_count()-1)
+    workers = 0
     batch_size = hyperparams['general']['batch_size']
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True, num_workers=workers)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, pin_memory=True, num_workers = workers)
@@ -251,7 +292,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
         pass  # Placeholder for future model implementation
 
     # 4. Train
-    trained_model = train_model(model, train_loader, val_loader, num_epochs=hyperparams['general']['num_epochs'],learning_rate=hyperparams['general']['learning_rate'])
+    trained_model = train_model(model, train_loader, val_loader, num_epochs=hyperparams['general']['num_epochs'],learning_rate=hyperparams['general']['learning_rate'], output_size=output_size)
     
     # 5. evalutate on test set
     print("Final evaluation on test set:")
@@ -268,7 +309,7 @@ if __name__ == "__main__":
     df = overhaul_segments(df)
     df.drop(columns=['Segment'], inplace=True)
     df.rename(columns={"Segment_ID": "Segment"}, inplace=True)
-    df = filter_destination(df, find_ports())
+    df = add_destination_port(df, find_ports())
     print("Data loaded and segments overhauled.")
     # This prepares the data by removing the last X hours from test routes
     train_df, test_df = dataloader.train_test_split(df = df, prediction_horizon_hours=2.0)
@@ -284,8 +325,8 @@ if __name__ == "__main__":
 
     hyperparams = {
         "general": {
-        "batch_size": 256,
-        "num_epochs": 25,
+        "batch_size": 128,
+        "num_epochs": 50,
         "learning_rate": 0.0001,
         "test_size": test_len / total_len,
         "val_size": val_len / total_len,
@@ -294,18 +335,18 @@ if __name__ == "__main__":
 
         #Model specific hyperparameters
         "LSTM": {
-        "lstm_hidden_size": 128,
+        "lstm_hidden_size": 64,
         "lstm_num_layers": 5,
-        "dropout": 0.3,
+        "dropout": 0.1,
         "batch_first": True
         }, 
 
         "LSTM_Transformer": {
-        "hidden_size": 128,
+        "hidden_size": 256,
         "num_lstm_layers": 5,
         "num_heads": 8,
-        "num_transformer_layers": 4,
-        "dropout": 0.3,
+        "num_transformer_layers": 6,
+        "dropout": 0.1,
         "batch_first": True
         }
     }

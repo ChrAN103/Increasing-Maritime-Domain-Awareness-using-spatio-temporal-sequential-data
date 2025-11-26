@@ -14,6 +14,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
 
+import geopandas as gpd
+
 
 def download(url, filepath):
     """Simple download with progress tracking"""
@@ -107,123 +109,155 @@ def plot_trajectory_on_map(df, percentage_of_vessels=0.5):
                 ).add_to(m)
     return m
 
+def add_destination_port(df, ports):
+        # Convert AIS df to GeoDataFrame
+        df_gdf = gpd.GeoDataFrame(
+            df,
+            geometry=gpd.points_from_xy(df['Longitude'], df['Latitude']),
+            crs="EPSG:4326"
+        )
+
+        # Initialize Port column as no_port
+        df_gdf['Port'] = 'no_port'
+
+        # Group by MMSI and Segment
+        for (mmsi, segment), group in df_gdf.groupby(['MMSI', 'Segment']):
+            # Take the last point of the segment
+            last_point = group.iloc[-1].geometry
+
+            # Check which port contains this point
+            matching_port = ports[ports.contains(last_point)]
+
+            if not matching_port.empty:
+                port_locode = matching_port.iloc[0]['LOCODE']
+                df_gdf.loc[group.index, 'Port'] = port_locode
+
+        # Optional: drop geometry if you want plain DataFrame
+        return pd.DataFrame(df_gdf.drop(columns='geometry'))
+
 class MaritimeDataset(Dataset):
     def __init__(self, df, port_encoder=None, ship_type_encoder=None, feature_scaler=None, max_len=500):
-        """
-        Args:
-            df: DataFrame containing the ship trajectories
-            port_encoder: Fitted LabelEncoder for destinations (optional)
-            ship_type_encoder: Fitted LabelEncoder for ship types (optional)
-            feature_scaler: Fitted StandardScaler for features (optional)
-            max_len: Maximum sequence length to truncate to
-        """
         self.max_len = max_len
         
-        # 1. Encode Destinations (Targets) and categorical features
+        # --- 1. ENCODING SETUP ---
+
         if port_encoder is None:
+
             self.port_encoder = LabelEncoder()
-            # Fit on all unique destinations in the dataframe
-            self.port_encoder.fit(df['Destination'].astype(str).unique())
+
+            self.port_encoder.fit(df['Port'].astype(str).unique())
+
         else:
+
             self.port_encoder = port_encoder
-                   
-        # Encode 'Ship type' categorical feature
+
+
+        # --- Verification ---
+        # After this fit, self.port_encoder.transform(['no_port']) will always be 0
+        if self.port_encoder.transform(['no_port'])[0] == 0:
+            self.no_port_id = 0
+        else:
+            # Fallback (shouldn't happen with the code above)
+            self.no_port_id = self.port_encoder.transform(['no_port'])[0]
+            
+        print(f"The 'no_port' ID is successfully set to: {self.no_port_id}")
+            
         if ship_type_encoder is None:
             self.ship_type_encoder = LabelEncoder()
+            # Handle NaNs before fitting
             unique_types = df['Ship type'].fillna('Undefined').astype(str).unique()
             self.ship_type_encoder.fit(unique_types)
         else:
             self.ship_type_encoder = ship_type_encoder
 
-        # We work on a copy to avoid modifying the original dataframe
+        # Work on copy
         df_clean = df.copy()
 
-        # --- CYCLICAL ENCODING FOR COG ---
-        # Convert degrees to radians
-        # Fill NaNs with 0 (North) before conversion to avoid issues (they should already have been removed earlier but just in case)
-        cog_rad = np.deg2rad(df_clean['COG'].fillna(0))
+        # --- 2. VECTORIZED PRE-PROCESSING (Fast) ---
         
-        # Create new features
+        # Filter unknown destinations efficiently BEFORE the loop
+        # This removes the need for the 'if' check inside the loop
+        df_clean = df_clean[df_clean['Port'].isin(self.port_encoder.classes_)]
+        
+        # Pre-calculate Target Indices
+        df_clean['Target_Idx'] = self.port_encoder.transform(df_clean['Port'])
+
+        # Cyclical Encoding
+        cog_rad = np.deg2rad(df_clean['COG'].fillna(0))
         df_clean['sin_COG'] = np.sin(cog_rad)
         df_clean['cos_COG'] = np.cos(cog_rad)
         
-        # --- TRANSFORM SHIP TYPE ---
-        # Fill NaNs
+        # Ship Type Encoding
         s_types = df_clean['Ship type'].fillna('Undefined').astype(str)
-        
-        # Handle unseen labels in Test set (map to the first known class to prevent crash)
         known_types = set(self.ship_type_encoder.classes_)
-        s_types = s_types.apply(lambda x: x if x in known_types else list(known_types)[0])
-        
-        # Transform to integers
+        # Map unknown types to the first known class (safe fallback)
+        fallback_class = list(known_types)[0]
+        s_types = s_types.apply(lambda x: x if x in known_types else fallback_class)
         df_clean['Ship type'] = self.ship_type_encoder.transform(s_types)
 
-        # 2. Prepare Features
-        # Split into columns that need scaling vs those that don't
-        self.cols_to_scale = ['Latitude', 'Longitude', 'SOG', 'Length', 'Width']
-        self.cols_no_scale = ['sin_COG', 'cos_COG', 'Ship type'] # Don't scale integers/cyclical
-
+        # Scaling
+        self.cols_to_scale = ['Latitude', 'Longitude', 'SOG']
+        self.cols_no_scale = ['sin_COG', 'cos_COG', 'Log_RelativeTime']
         self.feature_cols = self.cols_to_scale + self.cols_no_scale
 
-        # Handle missing values for linear features by filling with 0 (just as a backup incase it previously slipped through)
+        # Fill NaNs
         for col in self.feature_cols:
-            if col not in df_clean.columns:
-                df_clean[col] = 0
+            if col not in df_clean.columns: df_clean[col] = 0
             df_clean[col] = df_clean[col].fillna(0)
 
-        # Normalize features
         if feature_scaler is None:
             self.feature_scaler = StandardScaler()
             self.feature_scaler.fit(df_clean[self.cols_to_scale].values)
         else:
             self.feature_scaler = feature_scaler
 
-        # Apply scaling globally (faster)
         df_clean[self.cols_to_scale] = self.feature_scaler.transform(df_clean[self.cols_to_scale].values)
 
-        # 3. Group by Trajectory (MMSI + Segment)
-        # We create a list of (features, target) tuples
+        # --- 3. SEQUENCE CREATION ---
         self.sequences = []
         self.targets = []
         
         print("Grouping data into sequences...")
-        # Group by MMSI and Segment to get individual trips
+        
+        # GroupBy is the last remaining slow part, but necessary for structure
         grouped = df_clean.groupby(['MMSI', 'Segment'])
         
         for _, group in grouped:
-               
-            # Sort by timestamp just in case
+            # Sort by timestamp
             group = group.sort_values('Timestamp')
+            group['Log_RelativeTime'] = np.log((group['Timestamp'] - group['Timestamp'].min()).dt.total_seconds() + 1)
             
-            # Get features
             feats = group[self.feature_cols].values
-
-            # Double check for any remaining NaNs or Infs that fucks with StandardScaler 
+            
+            # Fast check for bad data
             if np.isnan(feats).any() or np.isinf(feats).any():
                 continue
-                        
-            # Truncate if too long (good for memory and our PC's will thank us)
+                
+            # Truncate
             if len(feats) > self.max_len:
                 feats = feats[-self.max_len:]
                 
-            # Get target (Destination should be the same for the whole segment)
-            dest = str(group['Destination'].iloc[0])
+            # Convert to Tensor IMMEDIATELY (Float32 for features)
+            # clone().detach() is the safest way to avoid warnings
+            seq_tensor = torch.tensor(feats, dtype=torch.float32)
+            self.sequences.append(seq_tensor)
             
-            # Only add if destination is known/in encoder 
-            if dest in self.port_encoder.classes_:
-                target_idx = self.port_encoder.transform([dest])[0]
-                
-                self.sequences.append(torch.FloatTensor(feats))
-                self.targets.append(target_idx)
-                
+            # Append Target (Long for classification)
+            # We already computed this in 'Target_Idx' column
+            target_val = group['Target_Idx'].iloc[0]
+            self.targets.append(target_val)
+            
+        # Convert targets list to a single tensor (faster than list of 0-d tensors)
+        self.targets = torch.tensor(self.targets, dtype=torch.long)
+        
         print(f"Created {len(self.sequences)} sequences.")
 
     def __len__(self):
         return len(self.sequences)
 
     def __getitem__(self, idx):
+        # Zero-cost lookup
         return self.sequences[idx], self.targets[idx]
-
 
 def get_device():
     device = torch.device("cpu")
