@@ -141,9 +141,10 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
     
     for epoch in range(num_epochs):
         total_loss = 0
+        model.train()
         
         for sequences, lengths, targets in train_loader:
-            sequences, targets = sequences.to(device), targets.to(device)
+            sequences, targets = sequences.to(device, non_blocking = True), targets.to(device, non_blocking = True)
             
             # Forward pass
             outputs = model(sequences, lengths=lengths)
@@ -190,11 +191,11 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
 
     mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
 
-    # Save the best model 
-    if (val_accuracy > best_val_accuracy):
-        best_val_accuracy = val_accuracy
-        mlflow.pytorch.log_model(model, "best_model")
-        print("Best model saved with accuracy: {:.2f}%".format(best_val_accuracy))
+    # # Save the best model 
+    # if (val_accuracy > best_val_accuracy):
+    #     best_val_accuracy = val_accuracy
+    #     mlflow.pytorch.log_model(model, "best_model")
+    #     print("Best model saved with accuracy: {:.2f}%".format(best_val_accuracy))
 
 def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     # 1. Create Datasets
@@ -211,10 +212,11 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
                                  feature_scaler=train_dataset.feature_scaler)
 
     # 2. Create DataLoaders
+    workers = max(1, os.cpu_count()-1)
     batch_size = hyperparams['general']['batch_size']
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_fn, pin_memory=True, num_workers=workers)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, pin_memory=True, num_workers = workers)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_fn, pin_memory=True, num_workers = workers)
     
     # 3. Initialize Model
     input_size = len(train_dataset.feature_cols) # e.g., 4 (Lat, Lon, SOG, COG)
@@ -258,7 +260,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     return trained_model
 
 if __name__ == "__main__":
-    path = "./data/processed_data"
+    path = "../data/processed_data"
     dataloader = Dataloader(out_path=path)
     df = dataloader.load_data()  # load all files in the processed_data folderS
     # Ensure ship and segment can be told apart by adding column for date
@@ -282,7 +284,7 @@ if __name__ == "__main__":
 
     hyperparams = {
         "general": {
-        "batch_size": 64,
+        "batch_size": 256,
         "num_epochs": 25,
         "learning_rate": 0.0001,
         "test_size": test_len / total_len,

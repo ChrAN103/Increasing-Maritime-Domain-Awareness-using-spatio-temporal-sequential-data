@@ -25,11 +25,10 @@ class LSTMPositionalEncoding(nn.Module):
 
     def forward(self, x, lengths): 
 
-        packed_x = pack_padded_sequence(x, lengths.cpu(), batch_first=True, enforce_sorted=False)
+        packed_x = pack_padded_sequence(x, lengths, batch_first=True, enforce_sorted=False)
 
         packed_out, (hn, _) = self.encoder_lstm(packed_x)
 
         out, out_lengths = pad_packed_sequence(packed_out, batch_first=True)
-
    
         return out

@@ -1,4 +1,4 @@
-artifact_location: file:///Users/madshaakonsson/Desktop/DL/marinetime-project/mlruns/639094937276638880
+artifact_location: ./mlruns/639094937276638880
 creation_time: 1764095525420
 experiment_id: '639094937276638880'
 last_update_time: 1764095525420
