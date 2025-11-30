@@ -20,6 +20,13 @@ from src.lstm_transformer.lstm_transformer_classifier import LSTMTransformerClas
 import mlflow
 import mlflow.pytorch
 
+
+#Setting seed for reproducibility 
+torch.manual_seed(42)
+np.random.seed(42)
+torch.cuda.manual_seed_all(42)  
+
+
 def filter_destination(df, ports, drop_destinations=False):
     #set destination outside of ports to 'transit'
     if drop_destinations:
@@ -298,19 +305,23 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     print("Final evaluation on test set:")
     evaluate_model(trained_model, test_loader, device=get_device())
 
-    return trained_model
+    return trained_model 
 
-if __name__ == "__main__":
-    path = "../data/processed_data"
-    dataloader = Dataloader(out_path=path)
-    df = dataloader.load_data()  # load all files in the processed_data folderS
-    # Ensure ship and segment can be told apart by adding column for date
+def clean_data(df): 
     df['Date'] = df['Timestamp'].dt.date
     df = overhaul_segments(df)
     df.drop(columns=['Segment'], inplace=True)
     df.rename(columns={"Segment_ID": "Segment"}, inplace=True)
     df = add_destination_port(df, find_ports())
-    print("Data loaded and segments overhauled.")
+    print("Data loaded and segments overhauled.") 
+    return df
+
+
+if __name__ == "__main__":
+    path = "../data/processed_data"
+    dataloader = Dataloader(out_path=path)
+    df = dataloader.load_data()  # load all files in the processed_data folderS 
+    df = clean_data(df)
     # This prepares the data by removing the last X hours from test routes
     train_df, test_df = dataloader.train_test_split(df = df, prediction_horizon_hours=2.0)
     train_df, val_df = dataloader.train_test_split(df = train_df, prediction_horizon_hours=0, test_size=0.2) # should not remove further hours for validation as 2 hours are already removed
