@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 
 /data/processed_data/
+/data/cleaned_data.parquet
 .github/
 .specify
 .vscode/
