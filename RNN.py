@@ -37,6 +37,28 @@ def filter_destination(df, ports, drop_destinations=False):
 
 def find_ports():
     # 1. Load CSV
+    top_20_ports = [
+    ('DECKL', 1092.0),
+    ('DERSK', 675.0),
+    ('DKVOR', 611.0),
+    ('SEGOT', 578.0),
+    ('DKCPH', 363.0),
+    ('DEHTU', 299.0),
+    ('DKFRC', 296.0),
+    ('SEHEL', 250.0),
+    ('DKAAR', 176.0),
+    ('DKEBJ', 158.0),
+    ('SEMMA', 156.0),
+    ('DKKAL', 149.0),
+    ('DKFDV', 105.0),
+    ('SEVAG', 96.0),
+    ('DKKOG', 90.0),
+    ('DKAAL', 86.0),
+    ('DKHVS', 83.0),
+    ('SELAA', 82.0),
+    ('DKSVE', 80.0),
+    ('SEHAD', 79.0)
+]
     locodes = pd.read_csv("port_locodes.csv", sep=";")
 
     # 2. Clean the data: Drop rows where POLYGON is missing (NaN)
@@ -58,7 +80,9 @@ def find_ports():
     bbox = [60, 0, 50, 20] # North, West, South, East
     north, west, south, east = bbox
     ports = ports_gdf.cx[west:east, south:north]
-
+    
+    # 7. Further filter to top 20 ports by number of arrivals
+    ports = ports[ports['LOCODE'].isin([port[0] for port in top_20_ports])]
     return ports
 
 def collate_fn(batch):
@@ -145,8 +169,8 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
 
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     # Learning Rate Scheduler
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
-        
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3)
+    
     for epoch in range(num_epochs):
         total_loss = 0
         model.train()
@@ -180,6 +204,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         
         scheduler.step(val_loss)
         print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}, val_loss: {val_loss:.4f}\n")
+        print(scheduler.get_last_lr())
 
     return model
 
@@ -189,7 +214,7 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
     total = 0
     
     # --- New Metrics ---
-    no_port_id = 99  # <--- ASSUME 'no_port' CLASS ID IS 0. ADJUST IF NECESSARY.
+    no_port_id = 20  # <--- ASSUME 'no_port' CLASS ID IS 0. ADJUST IF NECESSARY.
     
     no_port_predictions = 0
     
@@ -370,7 +395,7 @@ if __name__ == "__main__":
 
     hyperparams = {
         "general": {
-        "batch_size": 128,
+        "batch_size": 32,
         "num_epochs": 50,
         "learning_rate": 0.0001,
         "test_size": test_len / total_len,
@@ -380,8 +405,8 @@ if __name__ == "__main__":
 
         #Model specific hyperparameters
         "LSTM": {
-        "lstm_hidden_size": 128,
-        "lstm_num_layers": 3,
+        "lstm_hidden_size": 1024,
+        "lstm_num_layers": 2,
         "dropout": 0.3,
         "batch_first": True
         }, 
@@ -396,7 +421,7 @@ if __name__ == "__main__":
         }
     }
 
-    models = ["LSTM"] #, "LSTM_Transformer"]  # Can add "LSTM_Transformer_Classifier" later
+    models = ["LSTM"]#, "LSTM_Transformer"]  # Can add "LSTM_Transformer_Classifier" later
 
     mlflow.set_experiment("Classifier-Experiment - Full Run 1: 25.Nov.2025")
     mlflow.set_experiment_tag("description", "Testing MLflow integration with LSTM model")
