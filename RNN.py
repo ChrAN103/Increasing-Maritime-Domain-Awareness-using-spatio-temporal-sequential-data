@@ -351,9 +351,9 @@ if __name__ == "__main__":
         }
     }
 
-    models = ["LSTM_Transformer", "LSTM"]  # Can add "LSTM_Transformer_Classifier" later
+    models = ["LSTM", "LSTM_Transformer"]  # Can add "LSTM_Transformer_Classifier" later
 
-    mlflow.set_experiment("Classifier-Experiment - Test Run")
+    mlflow.set_experiment("Classifier-Experiment - Full Run 1: 25.Nov.2025")
     mlflow.set_experiment_tag("description", "Testing MLflow integration with LSTM model")
 
     for model_name in models:
