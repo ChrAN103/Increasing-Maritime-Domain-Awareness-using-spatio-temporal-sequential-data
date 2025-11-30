@@ -19,7 +19,7 @@ import geopandas as gpd
 from src.lstm_transformer.lstm_transformer_classifier import LSTMTransformerClassifier  
 import mlflow
 import mlflow.pytorch
-
+from sklearn.utils.class_weight import compute_class_weight
 
 #Setting seed for reproducibility 
 torch.manual_seed(42)
@@ -125,7 +125,7 @@ class LSTM(nn.Module):
         out = self.fc_head(final_hidden)
         return out
 
-def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.001, output_size=None):
+def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.001, output_size=None, class_weights=None):
     best_val_accuracy = float('-inf') 
 
     device = get_device()
@@ -134,11 +134,19 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
     
     model = model.to(device)
     weights =torch.ones(output_size)
-    weights[99] = 0.3
-    criterion = nn.CrossEntropyLoss(weight=weights.to(device))
+    # Handle Class Imbalance
+    if class_weights is not None:
+        class_weights = class_weights.to(device)
+        criterion = nn.CrossEntropyLoss(weight=class_weights)
+        print("Using weighted CrossEntropyLoss")
+    else:
+        criterion = nn.CrossEntropyLoss()
+
+
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    model.train()
-    
+    # Learning Rate Scheduler
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, verbose=True)
+        
     for epoch in range(num_epochs):
         total_loss = 0
         model.train()
@@ -162,15 +170,17 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
             total_loss += loss.item()
         
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {avg_loss:.4f}") 
-
         # mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
         
         
         # Validation
+        val_loss = 0
         if val_loader:
             evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
-            
+        
+        scheduler.step(val_loss)
+        print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}, val_loss: {val_loss:.4f}\n")
+
     return model
 
 def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf')):
@@ -250,6 +260,30 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     # Initialize dataset with training data to fit scalers/encoders
     train_dataset = MaritimeDataset(train_df)
     
+    # Calculate class weights for handling class imbalance automatically
+    # We extract the targets from the dataset to see the distribution
+    y_train = train_dataset.targets
+    
+    # FIX: Ensure targets are simple integers (not tensors or objects) to avoid sklearn errors
+    y_train = np.array([int(x) for x in y_train])
+    
+    # Get unique classes present in the training data
+    present_classes = np.unique(y_train)
+    
+    # 'balanced' mode automatically adjusts weights inversely proportional to class frequencies
+    weights = compute_class_weight(class_weight='balanced', classes=present_classes, y=y_train)
+    
+    # Create a full weight tensor for ALL possible classes (model output size)
+    # Initialize with 1.0 for any class not present in training data
+    num_classes = len(train_dataset.port_encoder.classes_)
+    class_weights = torch.ones(num_classes, dtype=torch.float)
+    
+    # Map computed weights to the correct indices
+    for cls, weight in zip(present_classes, weights):
+        class_weights[cls] = weight
+        
+    print(f"Class weights calculated: {class_weights}")
+
     # Use the fitted encoder/scaler for test data
     test_dataset = MaritimeDataset(test_df, 
                                  port_encoder=train_dataset.port_encoder,
@@ -299,7 +333,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
         pass  # Placeholder for future model implementation
 
     # 4. Train
-    trained_model = train_model(model, train_loader, val_loader, num_epochs=hyperparams['general']['num_epochs'],learning_rate=hyperparams['general']['learning_rate'], output_size=output_size)
+    trained_model = train_model(model, train_loader, val_loader, num_epochs=hyperparams['general']['num_epochs'],learning_rate=hyperparams['general']['learning_rate'], output_size=output_size,class_weights=class_weights)
     
     # 5. evalutate on test set
     print("Final evaluation on test set:")
@@ -346,9 +380,9 @@ if __name__ == "__main__":
 
         #Model specific hyperparameters
         "LSTM": {
-        "lstm_hidden_size": 64,
-        "lstm_num_layers": 5,
-        "dropout": 0.1,
+        "lstm_hidden_size": 128,
+        "lstm_num_layers": 3,
+        "dropout": 0.3,
         "batch_first": True
         }, 
 
@@ -362,7 +396,7 @@ if __name__ == "__main__":
         }
     }
 
-    models = ["LSTM", "LSTM_Transformer"]  # Can add "LSTM_Transformer_Classifier" later
+    models = ["LSTM"] #, "LSTM_Transformer"]  # Can add "LSTM_Transformer_Classifier" later
 
     mlflow.set_experiment("Classifier-Experiment - Full Run 1: 25.Nov.2025")
     mlflow.set_experiment_tag("description", "Testing MLflow integration with LSTM model")
@@ -380,4 +414,18 @@ if __name__ == "__main__":
                                             test_df=test_df, 
                                             hyperparams=hyperparams, 
                                             model=model_name)
+        # Memory cleanup
+        # delete model object
+        del trained_model
+
+        # clear cpu memory with garbafe collection
+        import gc
+        gc.collect()
+
+        # emtpy cuda cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        print(f"memory cleaned up after training for {model_name}.")
+
     print("Training completed.")
