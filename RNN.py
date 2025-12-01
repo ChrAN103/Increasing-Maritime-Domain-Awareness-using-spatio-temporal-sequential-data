@@ -205,8 +205,10 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
             mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
         
         scheduler.step(val_loss)
-        print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}\n")
-        print(f"Current LR: {scheduler.get_last_lr()}")
+        print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}, val_loss: {val_loss:.4f}\n")
+        print(scheduler.get_last_lr())
+        mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
+        mlflow.log_metric("val_loss", val_loss, step=epoch+1)
 
     return model
 
@@ -341,6 +343,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     
     # 'balanced' mode automatically adjusts weights inversely proportional to class frequencies
     weights = compute_class_weight(class_weight='balanced', classes=present_classes, y=y_train)
+    mlflow.log_param("class_weights", weights.tolist())
     
     # Create a full weight tensor for ALL possible classes (model output size)
     # Initialize with 1.0 for any class not present in training data
@@ -468,7 +471,6 @@ if __name__ == "__main__":
     models = ["LSTM"]#, "LSTM_Transformer"]  # Can add "LSTM_Transformer_Classifier" later
 
     mlflow.set_experiment("Classifier-Experiment - Full Run 1: 25.Nov.2025")
-    mlflow.set_experiment_tag("description", "Testing MLflow integration with LSTM model")
 
     for model_name in models:
         print(f"Training model: {model_name}")
