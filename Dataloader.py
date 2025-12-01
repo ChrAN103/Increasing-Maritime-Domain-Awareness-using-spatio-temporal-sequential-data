@@ -79,6 +79,7 @@ from shapely.ops import unary_union
 from shapely.prepared import prep
 import zipfile
 from shapely.geometry import MultiPoint
+import numpy as np
 
 class Dataloader:
     """A class for loading and preprocessing maritime spatio-temporal sequential data.
@@ -90,6 +91,52 @@ class Dataloader:
         self.out_path = out_path
         self.zip_path = zip_path
         self.csv_internal_path = csv_internal_path
+
+    def pre_clean_data(self):
+        dtypes = {
+            "MMSI": "object",
+            "SOG": float,
+            "COG": float,
+            "Longitude": float,
+            "Latitude": float,
+            "# Timestamp": "object",
+            "Type of mobile": "object",
+            "Ship type": "object",
+            "Length": float,
+            "Width": float,
+        }
+        usecols = list(dtypes.keys())
+
+        # Read CSV: either from ZIP or from direct file path
+        if self.zip_path and self.csv_internal_path:
+            # Read from ZIP archive
+            with zipfile.ZipFile(self.zip_path, 'r') as zip_ref:
+                with zip_ref.open(self.csv_internal_path) as csv_file:
+                    df = pd.read_csv(csv_file, usecols=usecols, dtype=dtypes)
+        else:
+            # Read from direct file path
+            df = pd.read_csv(self.file_path, usecols=usecols, dtype=dtypes)
+        
+        # Remove errors
+        bbox = [60, 0, 50, 20]
+        north, west, south, east = bbox
+        df = df[(df["Latitude"] <= north) & (df["Latitude"] >= south) & 
+                (df["Longitude"] >= west) & (df["Longitude"] <= east)]
+        
+        #keep Class A only (better data quality for commercial routes)
+        df = df[df["Type of mobile"] == "Class A"]
+        #keep tanker and cargo only
+        df = df[(df["Ship type"].str.startswith("Tanker")) | (df["Ship type"].str.startswith("Cargo"))]
+        df = df.rename(columns={"# Timestamp": "Timestamp"})
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], format="%d/%m/%Y %H:%M:%S", errors="coerce")
+        df = df.drop_duplicates(["Timestamp", "MMSI"], keep="first")
+
+        table = pyarrow.Table.from_pandas(df, preserve_index=False)
+        pyarrow.parquet.write_to_dataset(
+            table,
+            root_path=self.out_path,
+            partition_cols=["MMSI"]
+        )
 
     def clean_data(self):
         dtypes = {
@@ -279,24 +326,26 @@ class Dataloader:
         print(f"Loaded {len(combined_df)} total records from {len(dfs)} date folder(s)")
         return combined_df
     
-    def train_test_split(self, df: pd.DataFrame, prediction_horizon_hours: float = 2.0, test_size: float = 0.2):
+    def train_test_split(self, df: pd.DataFrame,validation_size: float = 0.15, test_size: float = 0.15):
         """
         Split data into train/test with last X hours removed for prediction task
         
         Args:
             df: DataFrame loaded from load_data()
-            prediction_horizon_hours: How many hours to remove from end of routes
+            validation_size: Proportion of segments to use for validation (0.0 to 1.0)
             test_size: Proportion of segments to use for testing (0.0 to 1.0)
         
         Returns:
-            train_df, test_df: DataFrames ready for model training
+            train_df, validation_df, test_df: DataFrames ready for model training
         """
        
         train_segments = []
+        validation_segments = []
         test_segments = []
         
         # Calculate threshold for test split (e.g., 20% -> hash % 5 == 0)
-        test_threshold = int(1 / test_size)
+        test_cutoff = int(test_size * 100)
+        val_cutoff = int((test_size + validation_size) * 100)
         
         total_segments = 0
         kept_segments = 0
@@ -308,41 +357,64 @@ class Dataloader:
             if not pd.api.types.is_datetime64_any_dtype(group['Timestamp']):
                 group['Timestamp'] = pd.to_datetime(group['Timestamp'])
             
-            if prediction_horizon_hours > 0:
-                max_time = group['Timestamp'].max()
-                cutoff_time = max_time - pd.Timedelta(hours=prediction_horizon_hours)
-                
+            split_mod = kept_segments % 100
+            test_cutoff = int(test_size * 100)
+            val_cutoff = int((test_size + validation_size) * 100)
+        
+            is_test = split_mod < test_cutoff
+            is_val = (split_mod >= test_cutoff) and (split_mod < val_cutoff)
+
+            if is_test or is_val:
+                horizons_minutes = [15, 30, 60, 120]
+            else:
+            # Train gets RANDOMIZED horizons for augmentation
+                edges = np.linspace(15, 120, num=5+1)
+                horizons_minutes = np.random.uniform(edges[:-1], edges[1:], size=5)
+    
+            max_time = group['Timestamp'].max()
+            routes = []
+                # CHANGED: Use counter-based split (Round Robin) instead of Hash
+                # This ensures that even if we split an already-split dataset, we still get a valid test set.
+
+            for idx, prediction_horizon_minutes in enumerate(horizons_minutes):
+                short = False
+                sample_id = f"{mmsi}_{segment}_{idx}"
+                cutoff_time = max_time - pd.Timedelta(minutes=prediction_horizon_minutes)
                 # Remove last X hours
                 # If max_time is 14:00 and we want to remove 2 hours, cutoff is 12:00
                 # We keep all timestamps < 12:00 (the early part of the route)
                 partial_route = group[group['Timestamp'] < cutoff_time].copy()
-            else:
-                # Keep full route
-                partial_route = group.copy()
-                       
-            if len(partial_route) > 256:  # Ensure minimum track length after cutting
-                kept_segments += 1
-                
-                # Preserve destination label from original route
-                partial_route.loc[:, 'Destination'] = group['Destination'].iloc[0]
-                
-                # CHANGED: Use counter-based split (Round Robin) instead of Hash
-                # This ensures that even if we split an already-split dataset, we still get a valid test set.
-                if kept_segments % test_threshold == 0:
-                    test_segments.append(partial_route)
+                partial_route['Horizon_Min'] = prediction_horizon_minutes
+                if len(partial_route) > 256:  # Ensure minimum track length after cutting
+                    # Preserve destination label from original route
+                    partial_route.loc[:, 'Port'] = group['Port'].iloc[0]
+                    partial_route['SampleID'] = sample_id
+                    routes.append(partial_route)
                 else:
-                    train_segments.append(partial_route)
+                    short = True
+                    break
+            if not short:
+                kept_segments += 1
+                if is_test:
+                    test_segments.extend(routes)
+                elif is_val:
+                    validation_segments.extend(routes)
+                else:
+                    port_label = group['Port'].iloc[0] if 'Port' in group.columns else None
+                    if port_label == "no_port":
+                        # take a single of routes random
+                        routes = [routes[np.random.randint(len(routes))]]
+                    train_segments.extend(routes)
         
         print(f"Total segments: {total_segments}")
-        print(f"Segments after {prediction_horizon_hours}h cutoff (len > 256): {kept_segments}")
         print(f"Train segments: {len(train_segments)}")
         print(f"Test segments: {len(test_segments)}")
         
         if not train_segments or not test_segments:
             raise ValueError("Train or test set is empty! Adjust prediction_horizon_hours or check data.")
-        
+
         train_df = pd.concat(train_segments, ignore_index=True)
         test_df = pd.concat(test_segments, ignore_index=True)
+        validation_df = pd.concat(validation_segments, ignore_index=True)
         
-        return train_df, test_df
-    
+        return train_df, validation_df, test_df

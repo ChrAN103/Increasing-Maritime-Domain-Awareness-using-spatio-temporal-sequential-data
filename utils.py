@@ -216,11 +216,11 @@ class MaritimeDataset(Dataset):
         # --- 3. SEQUENCE CREATION ---
         self.sequences = []
         self.targets = []
-        
+        self.horizons = []
         print("Grouping data into sequences...")
         
         # GroupBy is the last remaining slow part, but necessary for structure
-        grouped = df_clean.groupby(['MMSI', 'Segment'])
+        grouped = df_clean.groupby('SampleID')
         
         for _, group in grouped:
             # Sort by timestamp
@@ -246,6 +246,9 @@ class MaritimeDataset(Dataset):
             # We already computed this in 'Target_Idx' column
             target_val = group['Target_Idx'].iloc[0]
             self.targets.append(target_val)
+
+            h_val = group['Horizon_Min'].iloc[0]
+            self.horizons.append(h_val)
             
         # Convert targets list to a single tensor (faster than list of 0-d tensors)
         self.targets = torch.tensor(self.targets, dtype=torch.long)
@@ -257,7 +260,7 @@ class MaritimeDataset(Dataset):
 
     def __getitem__(self, idx):
         # Zero-cost lookup
-        return self.sequences[idx], self.targets[idx]
+        return self.sequences[idx], self.targets[idx], self.horizons[idx]
 
 def get_device():
     device = torch.device("cpu")

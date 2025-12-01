@@ -92,8 +92,9 @@ def collate_fn(batch):
         padded_seqs: Tensor of shape (batch_size, max_len, input_size)
         lengths: Tensor of shape (batch_size) containing original lengths
         targets: Tensor of shape (batch_size)
+        horizons: Tensor of shape (batch_size) containing prediction horizons
     """
-    sequences, targets = zip(*batch)
+    sequences, targets, horizons = zip(*batch)
     
     # Get lengths of each sequence
     lengths = torch.tensor([seq.size(0) for seq in sequences], dtype=torch.long)
@@ -101,9 +102,10 @@ def collate_fn(batch):
     # Pad sequences (batch_first=True makes it [Batch, Seq, Feat])
     padded_seqs = pad_sequence(sequences, batch_first=True, padding_value=-1000) # Use a unlikely padding value according to standardization as we use StandardScaler
     
-    targets = torch.tensor(targets, dtype=torch.long) 
+    targets = torch.tensor(targets, dtype=torch.long)
+    horizons = torch.tensor(horizons, dtype=torch.long)
     
-    return padded_seqs, lengths, targets
+    return padded_seqs, lengths, targets, horizons
 
 class LSTM(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1, dropout=0.3):
@@ -157,7 +159,6 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
     print(f"Training on {device}")
     
     model = model.to(device)
-    weights =torch.ones(output_size)
     # Handle Class Imbalance
     if class_weights is not None:
         class_weights = class_weights.to(device)
@@ -175,7 +176,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         total_loss = 0
         model.train()
         
-        for sequences, lengths, targets in train_loader:
+        for sequences, lengths, targets, horizons in train_loader:
             sequences, targets = sequences.to(device, non_blocking = True), targets.to(device, non_blocking = True)
             
             # Forward pass
@@ -194,67 +195,110 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
             total_loss += loss.item()
         
         avg_loss = total_loss / len(train_loader)
-        # mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
+        mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
         
         
         # Validation
-        val_loss = 0
+        val_loss = avg_loss  # Use training loss for scheduler if no separate val loss
         if val_loader:
-            evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
+            val_accuracy = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
+            mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
         
         scheduler.step(val_loss)
-        print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}, val_loss: {val_loss:.4f}\n")
-        print(scheduler.get_last_lr())
+        print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}\n")
+        print(f"Current LR: {scheduler.get_last_lr()}")
 
     return model
 
-def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf')):
+def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf'), no_port_id=20):
+    """
+    Evaluate model with horizon-based metrics breakdown.
+    Tracks accuracy per prediction horizon (e.g., 15, 30, 60, 120 min).
+    """
     model.eval()
-    correct = 0
-    total = 0
     
-    # --- New Metrics ---
-    no_port_id = 20  # <--- ASSUME 'no_port' CLASS ID IS 0. ADJUST IF NECESSARY.
-    
-    no_port_predictions = 0
-    
-    port_correct = 0
-    port_total = 0 # Total samples that are NOT 'no_port' (i.e., targets != no_port_id)
-    # -------------------
-    
+    # Initialize a dictionary to hold stats for each horizon
+    # Structure: { 15: {'correct': 0, 'total': 0, ...}, 30: {...} }
+    horizon_stats = {} 
+
     with torch.no_grad():
-        for sequences, lengths, targets in val_loader:
-            sequences, targets = sequences.to(device), targets.to(device)
+        for sequences, lengths, targets, horizons in val_loader:
+            sequences = sequences.to(device)
+            targets = targets.to(device)
+            horizons = horizons.to(device)
+            
             outputs = model(sequences, lengths=lengths)
             _, predicted = torch.max(outputs.data, 1)
-            
-            # --- Standard Accuracy Calculation ---
-            total += targets.size(0)
-            correct += (predicted == targets).sum().item()
-            # -------------------------------------
-            
-            # --- Granular Metrics Calculation ---
-            
-            # 1. Count 'no_port' predictions
-            no_port_predictions += (predicted == no_port_id).sum().item()
-            
-            # 2. Identify samples that are actually 'port' (i.e., not 'no_port')
-            is_port_target = (targets != no_port_id)
-            port_total += is_port_target.sum().item()
-            
-            # 3. Calculate 'port' accuracy (correct predictions ONLY for the port classes)
-            # Find correct predictions where the target IS a port (not no_port)
-            port_correct += ((predicted == targets) & is_port_target).sum().item()
-            # ------------------------------------
-            
-    val_accuracy = 100 * correct / total if total > 0 else 0
+
+            # Get unique horizons present in this batch (usually 15, 30, 60, 120)
+            unique_horizons = torch.unique(horizons)
+
+            for h in unique_horizons:
+                h_val = int(h.item())  # Convert tensor to python int (e.g., 15)
+                
+                # Create bucket if it doesn't exist
+                if h_val not in horizon_stats:
+                    horizon_stats[h_val] = {
+                        'total': 0, 'correct': 0, 
+                        'port_total': 0, 'port_correct': 0,
+                        'no_port_pred': 0
+                    }
+                
+                # Create a mask for the current horizon
+                mask = (horizons == h)
+                
+                # Filter predictions and targets for this specific horizon
+                sub_targets = targets[mask]
+                sub_preds = predicted[mask]
+                
+                # --- Update Metrics for this Horizon ---
+                
+                # 1. Standard Accuracy
+                horizon_stats[h_val]['total'] += sub_targets.size(0)
+                horizon_stats[h_val]['correct'] += (sub_preds == sub_targets).sum().item()
+                
+                # 2. No Port Predictions
+                horizon_stats[h_val]['no_port_pred'] += (sub_preds == no_port_id).sum().item()
+                
+                # 3. Port Specific Accuracy
+                is_port_target = (sub_targets != no_port_id)
+                horizon_stats[h_val]['port_total'] += is_port_target.sum().item()
+                horizon_stats[h_val]['port_correct'] += ((sub_preds == sub_targets) & is_port_target).sum().item()
+
+    # --- Print Results Sorted by Horizon ---
+    print(f"\n{'='*60}")
+    print(f"{'Horizon':<10} | {'Acc (All)':<12} | {'Acc (Ports)':<12} | {'No Port Preds'}")
+    print(f"{'-'*60}")
+
+    # Sort keys to print 15, 30, 60, 120 in order
+    total_correct_all = 0
+    total_samples_all = 0
+
+    for h_val in sorted(horizon_stats.keys()):
+        stats = horizon_stats[h_val]
+        
+        # Calculate percentages
+        acc_all = 100 * stats['correct'] / stats['total'] if stats['total'] > 0 else 0
+        acc_port = 100 * stats['port_correct'] / stats['port_total'] if stats['port_total'] > 0 else 0
+        
+        print(f"{h_val} min     | {acc_all:.2f}%       | {acc_port:.2f}%       | {stats['no_port_pred']}")
+        
+        # Log per-horizon metrics to MLflow
+        if epoch is not None:
+            mlflow.log_metric(f"acc_all_{h_val}min", acc_all, step=epoch+1)
+            mlflow.log_metric(f"acc_port_{h_val}min", acc_port, step=epoch+1)
+        
+        # Aggregate for global average
+        total_correct_all += stats['correct']
+        total_samples_all += stats['total']
+
+    # Print Global Average
+    global_acc = 100 * total_correct_all / total_samples_all if total_samples_all > 0 else 0
+    print(f"{'-'*60}")
+    print(f"OVERALL    | {global_acc:.2f}%       | --           | --")
+    print(f"{'='*60}\n")
     
-    # Calculate accuracy for port classes only
-    port_accuracy = 100 * port_correct / port_total if port_total > 0 else 0
-    
-    print(f'Validation Accuracy (All): {val_accuracy:.2f}%')
-    print(f'Total "no_port" predictions: {no_port_predictions}')
-    print(f'Port-Specific Accuracy (Targets != no_port): {port_accuracy:.2f}%')
+    return global_acc
 
 # def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf')):
 #     model.eval()
@@ -362,7 +406,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     
     # 5. evalutate on test set
     print("Final evaluation on test set:")
-    evaluate_model(trained_model, test_loader, device=get_device())
+    evaluate_model(trained_model, test_loader, device=get_device(), epoch=None, best_val_accuracy=None)
 
     return trained_model 
 
@@ -377,14 +421,14 @@ def clean_data(df):
 
 
 if __name__ == "__main__":
-    path = "../data/processed_data"
+    path = "data/processed"
     dataloader = Dataloader(out_path=path)
     df = dataloader.load_data()  # load all files in the processed_data folderS 
     df = clean_data(df)
-    # This prepares the data by removing the last X hours from test routes
-    train_df, test_df = dataloader.train_test_split(df = df, prediction_horizon_hours=2.0)
-    train_df, val_df = dataloader.train_test_split(df = train_df, prediction_horizon_hours=0, test_size=0.2) # should not remove further hours for validation as 2 hours are already removed
-    print("Data split into train and test.")
+    # This prepares the data with multiple prediction horizons
+    # Returns train, validation, and test DataFrames with horizon information
+    train_df, val_df, test_df = dataloader.train_test_split(df=df)
+    print("Data split into train, validation, and test.")
     # 4. Train the RNN
     print("Starting training...")
 
