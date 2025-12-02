@@ -153,7 +153,7 @@ class LSTM(nn.Module):
 
 def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.001, output_size=None, class_weights=None):
     best_val_accuracy = float('-inf') 
-
+    best_model = None
     device = get_device()
 
     print(f"Training on {device}")
@@ -201,7 +201,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         # Validation
         val_loss = avg_loss  # Use training loss for scheduler if no separate val loss
         if val_loader:
-            val_accuracy, best_val_accuracy, best_model = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
+            val_accuracy, best_val_accuracy, best_model = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy, best_model=best_model)
             mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
         
         scheduler.step(val_loss)
@@ -212,7 +212,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
 
     return best_model
 
-def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf'), no_port_id=20):
+def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf'), no_port_id=20, best_model=None):
     """
     Evaluate model with horizon-based metrics breakdown.
     Tracks accuracy per prediction horizon (e.g., 15, 30, 60, 120 min).
@@ -409,7 +409,7 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
     
     # 5. evalutate on test set
     print("Final evaluation on test set:")
-    evaluate_model(trained_model, test_loader, device=get_device(), epoch=None, best_val_accuracy=None)
+    evaluate_model(trained_model, test_loader, device=get_device(), epoch=None, best_val_accuracy=0, best_model=trained_model)
 
     return trained_model 
 
