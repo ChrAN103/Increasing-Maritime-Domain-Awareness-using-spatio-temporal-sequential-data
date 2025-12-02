@@ -80,6 +80,7 @@ from shapely.prepared import prep
 import zipfile
 from shapely.geometry import MultiPoint
 import numpy as np
+import random
 
 class Dataloader:
     """A class for loading and preprocessing maritime spatio-temporal sequential data.
@@ -338,7 +339,9 @@ class Dataloader:
         Returns:
             train_df, validation_df, test_df: DataFrames ready for model training
         """
-       
+        random.seed(42)  # For reproducibility
+        np.random.seed(42)
+
         train_segments = []
         validation_segments = []
         test_segments = []
