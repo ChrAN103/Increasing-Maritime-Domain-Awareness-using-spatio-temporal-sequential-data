@@ -201,7 +201,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         # Validation
         val_loss = avg_loss  # Use training loss for scheduler if no separate val loss
         if val_loader:
-            val_accuracy = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
+            val_accuracy, best_val_accuracy, best_model = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy)
             mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
         
         scheduler.step(val_loss)
@@ -210,7 +210,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
         mlflow.log_metric("val_loss", val_loss, step=epoch+1)
 
-    return model
+    return best_model
 
 def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf'), no_port_id=20):
     """
@@ -296,7 +296,11 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
     global_acc = 100 * total_correct_all / total_samples_all if total_samples_all > 0 else 0
     print(f"OVERALL    | {global_acc:.2f}%       | --           | --")
     
-    return global_acc
+    if (global_acc > best_val_accuracy):
+        best_val_accuracy = global_acc
+        best_model = model
+
+    return global_acc, best_val_accuracy, best_model
 
 # def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf')):
 #     model.eval()
@@ -481,6 +485,7 @@ if __name__ == "__main__":
                                             test_df=test_df, 
                                             hyperparams=hyperparams, 
                                             model=model_name)
+            mlflow.pytorch.log_model(trained_model, model_name)
         # Memory cleanup
         # delete model object
         del trained_model
