@@ -206,7 +206,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         
         scheduler.step(val_loss)
         print(f"Epoch [{epoch+1}/{num_epochs}] completed.\n train_loss: {avg_loss:.4f}, val_loss: {val_loss:.4f}\n")
-        print(scheduler.get_last_lr())
+        mlflow.log_metric("learning_rate", scheduler.get_last_lr()[0], step=epoch+1)
         mlflow.log_metric("train_loss", avg_loss, step=epoch+1)
         mlflow.log_metric("val_loss", val_loss, step=epoch+1)
 
@@ -268,9 +268,7 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
                 horizon_stats[h_val]['port_correct'] += ((sub_preds == sub_targets) & is_port_target).sum().item()
 
     # --- Print Results Sorted by Horizon ---
-    print(f"\n{'='*60}")
-    print(f"{'Horizon':<10} | {'Acc (All)':<12} | {'Acc (Ports)':<12} | {'No Port Preds'}")
-    print(f"{'-'*60}")
+    print(f"{'Horizon':<10} | {'Acc (All)':<12} | {'Acc (Ports)':<12} ")
 
     # Sort keys to print 15, 30, 60, 120 in order
     total_correct_all = 0
@@ -283,7 +281,7 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
         acc_all = 100 * stats['correct'] / stats['total'] if stats['total'] > 0 else 0
         acc_port = 100 * stats['port_correct'] / stats['port_total'] if stats['port_total'] > 0 else 0
         
-        print(f"{h_val} min     | {acc_all:.2f}%       | {acc_port:.2f}%       | {stats['no_port_pred']}")
+        print(f"{h_val} min     | {acc_all:.2f}%       | {acc_port:.2f}%  ")
         
         # Log per-horizon metrics to MLflow
         if epoch is not None:
@@ -296,9 +294,7 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
 
     # Print Global Average
     global_acc = 100 * total_correct_all / total_samples_all if total_samples_all > 0 else 0
-    print(f"{'-'*60}")
     print(f"OVERALL    | {global_acc:.2f}%       | --           | --")
-    print(f"{'='*60}\n")
     
     return global_acc
 
