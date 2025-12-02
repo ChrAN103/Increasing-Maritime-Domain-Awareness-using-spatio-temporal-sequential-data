@@ -12,7 +12,7 @@ from torch.nn.utils.rnn import pad_sequence, pack_padded_sequence, pad_packed_se
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import LabelEncoder, StandardScaler
-from Dataloader import Dataloader
+from Dataloader import Dataloader as dataloader_class
 from utils import overhaul_segments, MaritimeDataset, get_device, add_destination_port
 from shapely import wkt
 import geopandas as gpd
@@ -425,7 +425,7 @@ def clean_data(df):
 
 if __name__ == "__main__":
     path = "data/processed"
-    dataloader = Dataloader(out_path=path)
+    dataloader = dataloader_class(out_path=path)
     df = dataloader.load_data()  # load all files in the processed_data folderS 
     df = clean_data(df)
     # This prepares the data with multiple prediction horizons
