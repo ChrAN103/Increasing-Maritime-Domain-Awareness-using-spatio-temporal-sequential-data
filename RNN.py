@@ -201,7 +201,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         # Validation
         val_loss = avg_loss  # Use training loss for scheduler if no separate val loss
         if val_loader:
-            val_accuracy, best_val_accuracy, best_model = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy, best_model=best_model)
+            val_accuracy, best_val_accuracy, best_model, val_loss = evaluate_model(model, val_loader, device, epoch=epoch, best_val_accuracy=best_val_accuracy, best_model=best_model, criterion=criterion)
             mlflow.log_metric("val_accuracy", val_accuracy, step=epoch+1)
         
         scheduler.step(val_loss)
@@ -212,7 +212,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
 
     return best_model
 
-def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf'), no_port_id=20, best_model=None):
+def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf'), no_port_id=20, best_model=None, criterion=None):
     """
     Evaluate model with horizon-based metrics breakdown.
     Tracks accuracy per prediction horizon (e.g., 15, 30, 60, 120 min).
@@ -222,6 +222,7 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
     # Initialize a dictionary to hold stats for each horizon
     # Structure: { 15: {'correct': 0, 'total': 0, ...}, 30: {...} }
     horizon_stats = {} 
+    total_val_loss = 0
 
     with torch.no_grad():
         for sequences, lengths, targets, horizons in val_loader:
@@ -230,6 +231,9 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
             horizons = horizons.to(device)
             
             outputs = model(sequences, lengths=lengths)
+            loss = criterion(outputs, targets)
+            total_val_loss += loss.item()
+
             _, predicted = torch.max(outputs.data, 1)
 
             # Get unique horizons present in this batch (usually 15, 30, 60, 120)
@@ -299,8 +303,8 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
     if (global_acc > best_val_accuracy):
         best_val_accuracy = global_acc
         best_model = model
-
-    return global_acc, best_val_accuracy, best_model
+    avg_val_loss = total_val_loss / len(val_loader)
+    return global_acc, best_val_accuracy, best_model, avg_val_loss
 
 # def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('-inf')):
 #     model.eval()
@@ -406,10 +410,13 @@ def setup_and_train(train_df, val_df, test_df, model, hyperparams):
 
     # 4. Train
     trained_model = train_model(model, train_loader, val_loader, num_epochs=hyperparams['general']['num_epochs'],learning_rate=hyperparams['general']['learning_rate'], output_size=output_size,class_weights=class_weights)
-    
+    if class_weights is not None:
+        test_criterion = nn.CrossEntropyLoss(weight=class_weights.to(get_device()))
+    else:
+        test_criterion = nn.CrossEntropyLoss()
     # 5. evalutate on test set
     print("Final evaluation on test set:")
-    evaluate_model(trained_model, test_loader, device=get_device(), epoch=None, best_val_accuracy=0, best_model=trained_model)
+    evaluate_model(trained_model, test_loader, device=get_device(), epoch=None, best_val_accuracy=0, best_model=trained_model, criterion=test_criterion)
 
     return trained_model 
 
