@@ -94,7 +94,7 @@ def collate_fn(batch):
         targets: Tensor of shape (batch_size)
         horizons: Tensor of shape (batch_size) containing prediction horizons
     """
-    sequences, targets, horizons = zip(*batch)
+    sequences, targets, horizons, sample_ids = zip(*batch)
     
     # Get lengths of each sequence
     lengths = torch.tensor([seq.size(0) for seq in sequences], dtype=torch.long)
@@ -104,8 +104,9 @@ def collate_fn(batch):
     
     targets = torch.tensor(targets, dtype=torch.long)
     horizons = torch.tensor(horizons, dtype=torch.long)
+    sample_ids = tuple(sample_ids)
     
-    return padded_seqs, lengths, targets, horizons
+    return padded_seqs, lengths, targets, horizons, sample_ids
 
 class LSTM(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, num_layers=1, dropout=0.3):
@@ -176,7 +177,7 @@ def train_model(model, train_loader, val_loader, num_epochs=25, learning_rate=0.
         total_loss = 0
         model.train()
         
-        for sequences, lengths, targets, horizons in train_loader:
+        for sequences, lengths, targets, horizons, sample_ids in train_loader:
             sequences, targets = sequences.to(device, non_blocking = True), targets.to(device, non_blocking = True)
             
             # Forward pass
@@ -225,7 +226,7 @@ def evaluate_model(model, val_loader, device, epoch=0, best_val_accuracy=float('
     total_val_loss = 0
 
     with torch.no_grad():
-        for sequences, lengths, targets, horizons in val_loader:
+        for sequences, lengths, targets, horizons, sample_ids in val_loader:
             sequences = sequences.to(device)
             targets = targets.to(device)
             horizons = horizons.to(device)

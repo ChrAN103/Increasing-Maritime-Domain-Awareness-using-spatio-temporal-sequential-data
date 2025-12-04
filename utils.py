@@ -16,6 +16,10 @@ from torch.utils.data import Dataset, DataLoader
 
 import geopandas as gpd
 
+from scipy import stats
+from mlflow.entities import ViewType
+import mlflow
+
 
 def download(url, filepath):
     """Simple download with progress tracking"""
@@ -217,6 +221,7 @@ class MaritimeDataset(Dataset):
         self.sequences = []
         self.targets = []
         self.horizons = []
+        self.sample_ids = []
         print("Grouping data into sequences...")
         
         # GroupBy is the last remaining slow part, but necessary for structure
@@ -249,6 +254,9 @@ class MaritimeDataset(Dataset):
 
             h_val = group['Horizon_Min'].iloc[0]
             self.horizons.append(h_val)
+
+            sample_id_val = group['SampleID'].iloc[0]
+            self.sample_ids.append(sample_id_val)
             
         # Convert targets list to a single tensor (faster than list of 0-d tensors)
         self.targets = torch.tensor(self.targets, dtype=torch.long)
@@ -260,7 +268,7 @@ class MaritimeDataset(Dataset):
 
     def __getitem__(self, idx):
         # Zero-cost lookup
-        return self.sequences[idx], self.targets[idx], self.horizons[idx]
+        return self.sequences[idx], self.targets[idx], self.horizons[idx], self.sample_ids[idx]
 
 def get_device():
     device = torch.device("cpu")
@@ -272,3 +280,102 @@ def get_device():
         device = torch.device("mps")
         
     return device
+
+class StatEvalAIS:
+    def __init__(self, experiment_id, test_loader, encoder, feature_scaler):
+        self.experiment_id = experiment_id
+        self.test_loader = test_loader
+        self.encoder = encoder
+        self.feature_scaler = feature_scaler
+
+    def load_models(self):
+        device = get_device()
+        LSTM_Transformer_run = mlflow.search_runs(experiment_ids=self.experiment_id,filter_string=f"params.model_type = 'LSTM_Transformer'", order_by=["attributes.start_time DESC"],max_results=1,run_view_type=ViewType.ACTIVE_ONLY)
+        LSTM_run = mlflow.search_runs(experiment_ids=self.experiment_id,filter_string=f"params.model_type = 'LSTM'", order_by=["attributes.start_time DESC"],max_results=1,run_view_type=ViewType.ACTIVE_ONLY)
+        
+        lstm_transformer_model = mlflow.pytorch.load_model(f"runs:/{LSTM_Transformer_run.iloc[0].run_id}/LSTM_Transformer_Model", map_location=device)
+        lstm_transformer_model.to(device)
+        lstm_transformer_model.eval()
+        
+        lstm_model = mlflow.pytorch.load_model(f"runs:/{LSTM_run.iloc[0].run_id}/LSTM_Model", map_location=device)
+        lstm_model.to(device)
+        lstm_model.eval()
+
+        self.lstm_transformer_model = lstm_transformer_model
+        self.lstm_model = lstm_model
+
+    def evaluate_models(self):
+        device = get_device()
+
+        lstm_transformer_list = []
+        lstm_transformer_logits_list = []
+        lstm_list = []
+        lstm_logits_list = []
+        targets_list = []
+        horizons_list = []
+        sample_ids_list = []
+
+        with torch.no_grad():
+            for sequences, lengths, targets, horizons, sample_ids in self.test_loader:
+                sequences = sequences.to(device)
+                targets = targets.to(device)
+                lengths = lengths.cpu()
+                horizons = horizons.to(device)
+                outputs_lstm_transformer = self.lstm_transformer_model(sequences, lengths=lengths)
+                outputs_lstm = self.lstm_model(sequences, lengths=lengths)
+                _, predicted_lstm_transformer = torch.max(outputs_lstm_transformer.data, 1)
+                _, predicted_lstm = torch.max(outputs_lstm.data, 1)
+
+                lstm_transformer_list.append(predicted_lstm_transformer.cpu().numpy())
+                lstm_transformer_logits_list.append(outputs_lstm_transformer.cpu().numpy())
+                lstm_list.append(predicted_lstm.cpu().numpy())
+                lstm_logits_list.append(outputs_lstm.cpu().numpy())
+                targets_list.append(targets.cpu().numpy())
+                horizons_list.append(horizons.cpu().numpy())
+                sample_ids_list.append(np.array(sample_ids))
+        
+        eval_df = pd.DataFrame({"LSTM Transformer": np.concatenate(lstm_transformer_list),
+                                "LSTM Tranformer logits": list(np.concatenate(lstm_transformer_logits_list)),
+                                "LSTM": np.concatenate(lstm_list),
+                                "LSTM logits": list(np.concatenate(lstm_logits_list)),
+                                "targets": np.concatenate(targets_list),
+                                "horizons": np.concatenate(horizons_list),
+                                "sample_ids": np.concatenate(sample_ids_list)
+                                })
+        
+        self.eval_df = eval_df
+
+    def filter_recall(self,df, ports):
+        df_filtered = df[df['targets'].isin(ports)]
+        return df_filtered
+
+    def filter_precision(self, df, ports, model_name):
+        df_filtered = df[df[model_name].isin(ports)]
+        return df_filtered
+
+    def confidence_intervals_bootstrap(self, model_name, df):
+        preds = df[model_name]
+        targets = df['targets']
+        n_samples = len(targets)
+        rng = np.random.default_rng(seed=42)
+        samples_indexes = rng.integers(0, n_samples, size=(10000, n_samples))
+        stats = []
+        for indexes in samples_indexes:
+            sample_preds = preds.iloc[indexes]
+            sample_targets = targets.iloc[indexes]
+            accuracy = (sample_preds == sample_targets).mean()
+            stats.append(accuracy)
+        lower_bound = np.percentile(stats, 2.5)
+        upper_bound = np.percentile(stats, 97.5)
+        mean = np.mean(stats)
+        return lower_bound, mean, upper_bound
+
+    def paired_t_test(self,df):
+        lstm_preds = df['LSTM']
+        lstm_transformer_preds = df['LSTM Transformer']
+        targets = df['targets']
+        t_stat, p_value = stats.ttest_rel((lstm_preds == targets).astype(int), (lstm_transformer_preds == targets).astype(int))
+
+        lstm_mean = (lstm_preds == targets).mean()
+        lstm_transformer_mean = (lstm_transformer_preds == targets).mean()
+        return t_stat, p_value, lstm_mean, lstm_transformer_mean
