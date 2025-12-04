@@ -65,6 +65,7 @@ stack-data
 sympy
 threadpoolctl
 torch
+mlflow
 tornado
 tqdm
 traitlets
@@ -75,3 +76,5 @@ wcwidth
 xyzservices
 PySocks
 shapely
+seaborn
+statsmodels

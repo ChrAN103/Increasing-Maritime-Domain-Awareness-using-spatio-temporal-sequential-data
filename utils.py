@@ -17,6 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 import geopandas as gpd
 
 from scipy import stats
+from statsmodels.stats.contingency_tables import mcnemar
 from mlflow.entities import ViewType
 import mlflow
 
@@ -201,7 +202,7 @@ class MaritimeDataset(Dataset):
 
         # Scaling
         self.cols_to_scale = ['Latitude', 'Longitude', 'SOG']
-        self.cols_no_scale = ['sin_COG', 'cos_COG', 'Log_RelativeTime']
+        self.cols_no_scale = ['sin_COG', 'cos_COG', 'Log_Time_Delta']
         self.feature_cols = self.cols_to_scale + self.cols_no_scale
 
         # Fill NaNs
@@ -230,7 +231,8 @@ class MaritimeDataset(Dataset):
         for _, group in grouped:
             # Sort by timestamp
             group = group.sort_values('Timestamp')
-            group['Log_RelativeTime'] = np.log((group['Timestamp'] - group['Timestamp'].min()).dt.total_seconds() + 1)
+            time_deltas = group['Timestamp'].diff().dt.total_seconds().fillna(0)
+            group['Log_Time_Delta'] = np.log1p(time_deltas)
             
             feats = group[self.feature_cols].values
             
@@ -370,12 +372,21 @@ class StatEvalAIS:
         mean = np.mean(stats)
         return lower_bound, mean, upper_bound
 
-    def paired_t_test(self,df):
-        lstm_preds = df['LSTM']
-        lstm_transformer_preds = df['LSTM Transformer']
-        targets = df['targets']
-        t_stat, p_value = stats.ttest_rel((lstm_preds == targets).astype(int), (lstm_transformer_preds == targets).astype(int))
+    def mcnemar_test(self, df):
+        lstm_correct = (df['LSTM'] == df['targets'])
+        lstm_transformer_correct = (df['LSTM Transformer'] == df['targets'])
 
-        lstm_mean = (lstm_preds == targets).mean()
-        lstm_transformer_mean = (lstm_transformer_preds == targets).mean()
+        lstm_correct_lstm_transformer_wrong = ((lstm_correct == True) & (lstm_transformer_correct == False)).sum()
+        lstm_wrong_lstm_transformer_correct = ((lstm_correct == False) & (lstm_transformer_correct == True)).sum()
+        both_wrong = ((lstm_correct == False) & (lstm_transformer_correct == False)).sum()
+        both_correct = ((lstm_correct == True) & (lstm_transformer_correct == True)).sum()
+        table = [[both_correct, lstm_correct_lstm_transformer_wrong],
+                 [lstm_wrong_lstm_transformer_correct, both_wrong]]
+        
+        result = mcnemar(table, exact=False)
+        t_stat = result.statistic
+        p_value = result.pvalue
+
+        lstm_mean = lstm_correct.mean()
+        lstm_transformer_mean = lstm_transformer_correct.mean()
         return t_stat, p_value, lstm_mean, lstm_transformer_mean

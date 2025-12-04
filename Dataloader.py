@@ -411,6 +411,7 @@ class Dataloader:
         
         print(f"Total segments: {total_segments}")
         print(f"Train segments: {len(train_segments)}")
+        print(f"Validation segments: {len(validation_segments)}")
         print(f"Test segments: {len(test_segments)}")
         
         if not train_segments or not test_segments:
